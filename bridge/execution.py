@@ -60,12 +60,14 @@ class _BlockedImportFinder(importlib.abc.MetaPathFinder):
     _active = False
     _blocked: set[str] = set()
 
-    def find_module(self, fullname: str, path=None):  # noqa: D401
+    def find_module(self, fullname: str, path=None):
+        """Return *self* if the module should be blocked, ``None`` otherwise (legacy hook)."""
         if self._active and fullname in self._blocked:
             return self
         return None
 
     def find_spec(self, fullname: str, path=None, target=None):
+        """Raise ``ImportError`` for blocked modules (modern import hook)."""
         if self._active and fullname in self._blocked:
             raise ImportError(
                 f"Module {fullname!r} is blocked during ParaView MCP script execution"
@@ -199,11 +201,14 @@ def execute_code(
     result_holder: dict[str, Any] = {}
     start = time.monotonic()
 
+    # At this point code is guaranteed to be a non-None str
+    assert isinstance(code, str)
+
     def _run() -> None:
         hidden = _install_import_blocker()
         try:
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-                exec(compile(code, "<paraview-mcp-script>", "exec"), namespace)  # type: ignore[arg-type]  # noqa: S102
+                exec(compile(code, "<paraview-mcp-script>", "exec"), namespace)  # noqa: S102
         except Exception as exc:
             result_holder["error"] = "".join(
                 traceback.format_exception(type(exc), exc, exc.__traceback__)
