@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "paraview-mcp-server"
+version = "0.1.0"
+description = "MCP server for controlling ParaView via AI assistants"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Adam Djellouli", email = "adam@djellouli.com" },
+]
+keywords = ["paraview", "mcp", "model-context-protocol", "ai", "visualization", "scientific-computing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/djeada/paraview-mcp-server"
+Repository = "https://github.com/djeada/paraview-mcp-server"
+Issues = "https://github.com/djeada/paraview-mcp-server/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/paraview_mcp_server"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "bridge/",
+    "docs/",
+    "scripts/",
+    "tests/",
+    "LICENSE",
+    "README.md",
+    "pyproject.toml",
+]
+
+[project.scripts]
+paraview-mcp-server = "paraview_mcp_server:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
