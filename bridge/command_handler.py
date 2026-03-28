@@ -35,24 +35,49 @@ class CommandHandler:
     # ------------------------------------------------------------------
 
     def _register(self):
+        # Scene / session
         self._handlers["scene.get_info"] = self._scene_get_info
         self._handlers["scene.list_sources"] = self._scene_list_sources
         self._handlers["scene.list_views"] = self._scene_list_views
         self._handlers["source.get_properties"] = self._source_get_properties
+
+        # Data loading
         self._handlers["source.open_file"] = self._source_open_file
         self._handlers["source.delete"] = self._source_delete
         self._handlers["source.rename"] = self._source_rename
+
+        # Display
         self._handlers["display.show"] = self._display_show
         self._handlers["display.hide"] = self._display_hide
         self._handlers["display.color_by"] = self._display_color_by
         self._handlers["display.set_representation"] = self._display_set_representation
+        self._handlers["display.set_opacity"] = self._display_set_opacity
+        self._handlers["display.rescale_transfer_function"] = (
+            self._display_rescale_transfer_function
+        )
+
+        # View / camera
         self._handlers["view.reset_camera"] = self._view_reset_camera
+        self._handlers["view.set_camera"] = self._view_set_camera
+        self._handlers["view.set_background"] = self._view_set_background
+
+        # Export
         self._handlers["export.screenshot"] = self._export_screenshot
         self._handlers["export.data"] = self._export_data
+        self._handlers["export.animation"] = self._export_animation
+
+        # Filters — basic
         self._handlers["filter.slice"] = self._filter_slice
         self._handlers["filter.clip"] = self._filter_clip
         self._handlers["filter.contour"] = self._filter_contour
         self._handlers["filter.threshold"] = self._filter_threshold
+
+        # Filters — advanced
+        self._handlers["filter.calculator"] = self._filter_calculator
+        self._handlers["filter.stream_tracer"] = self._filter_stream_tracer
+        self._handlers["filter.glyph"] = self._filter_glyph
+
+        # Python execution
         self._handlers["python.execute"] = self._python_execute
 
     # ------------------------------------------------------------------
@@ -192,6 +217,24 @@ class CommandHandler:
         display.Representation = params["representation"]
         return {"name": params["name"], "representation": params["representation"]}
 
+    def _display_set_opacity(self, params: dict) -> dict:
+        pvs = self._import_pv()
+        src = self._find_source(params["name"])
+        view = pvs.GetActiveViewOrCreate("RenderView")
+        display = pvs.GetDisplayProperties(src, view)
+        opacity = float(params["opacity"])
+        display.Opacity = opacity
+        return {"name": params["name"], "opacity": opacity}
+
+    def _display_rescale_transfer_function(self, params: dict) -> dict:
+        pvs = self._import_pv()
+        src = self._find_source(params["name"])
+        view = pvs.GetActiveViewOrCreate("RenderView")
+        display = pvs.GetDisplayProperties(src, view)
+        display.RescaleTransferFunctionToDataRange(False)
+        pvs.UpdateScalarBars(view)
+        return {"name": params["name"], "rescaled": True}
+
     # ------------------------------------------------------------------
     # View / camera handlers
     # ------------------------------------------------------------------
@@ -201,6 +244,36 @@ class CommandHandler:
         view = pvs.GetActiveViewOrCreate("RenderView")
         pvs.ResetCamera(view)
         return {"reset": True}
+
+    def _view_set_camera(self, params: dict) -> dict:
+        pvs = self._import_pv()
+        view = pvs.GetActiveViewOrCreate("RenderView")
+        camera = view.GetActiveCamera()
+        if "position" in params:
+            camera.SetPosition(*params["position"])
+        if "focal_point" in params:
+            camera.SetFocalPoint(*params["focal_point"])
+        if "view_up" in params:
+            camera.SetViewUp(*params["view_up"])
+        if "parallel_scale" in params:
+            camera.SetParallelScale(params["parallel_scale"])
+        view.StillRender()
+        pos = list(camera.GetPosition())
+        fp = list(camera.GetFocalPoint())
+        up = list(camera.GetViewUp())
+        return {"position": pos, "focal_point": fp, "view_up": up}
+
+    def _view_set_background(self, params: dict) -> dict:
+        pvs = self._import_pv()
+        view = pvs.GetActiveViewOrCreate("RenderView")
+        color = params["color"]
+        view.Background = color
+        if "color2" in params:
+            view.Background2 = params["color2"]
+            view.UseGradientBackground = True
+        else:
+            view.UseGradientBackground = False
+        return {"color": color, "gradient": "color2" in params}
 
     # ------------------------------------------------------------------
     # Export handlers
@@ -222,8 +295,27 @@ class CommandHandler:
         pvs.SaveData(filepath, proxy=src)
         return {"name": params["name"], "filepath": filepath}
 
+    def _export_animation(self, params: dict) -> dict:
+        pvs = self._import_pv()
+        filepath = params["filepath"]
+        width = int(params.get("width", 1920))
+        height = int(params.get("height", 1080))
+        frame_rate = int(params.get("frame_rate", 15))
+        view = pvs.GetActiveViewOrCreate("RenderView")
+        pvs.SaveAnimation(
+            filepath,
+            view,
+            ImageResolution=[width, height],
+            FrameRate=frame_rate,
+        )
+        return {
+            "filepath": filepath,
+            "resolution": [width, height],
+            "frame_rate": frame_rate,
+        }
+
     # ------------------------------------------------------------------
-    # Filter handlers
+    # Filter handlers — basic
     # ------------------------------------------------------------------
 
     def _filter_slice(self, params: dict) -> dict:
@@ -282,13 +374,82 @@ class CommandHandler:
         }
 
     # ------------------------------------------------------------------
+    # Filter handlers — advanced
+    # ------------------------------------------------------------------
+
+    def _filter_calculator(self, params: dict) -> dict:
+        pvs = self._import_pv()
+        src = self._find_source(params["input"])
+        expression = params["expression"]
+        result_name = params.get("result_name", "Result")
+        attribute_type = params.get("attribute_type", "Point Data")
+        filt = pvs.Calculator(Input=src)
+        filt.Function = expression
+        filt.ResultArrayName = result_name
+        filt.AttributeType = attribute_type
+        view = pvs.GetActiveViewOrCreate("RenderView")
+        pvs.Show(filt, view)
+        return {
+            "input": params["input"],
+            "filter": "Calculator",
+            "expression": expression,
+            "result_name": result_name,
+        }
+
+    def _filter_stream_tracer(self, params: dict) -> dict:
+        pvs = self._import_pv()
+        src = self._find_source(params["input"])
+        seed_type = params.get("seed_type", "Point Cloud")
+        num_points = int(params.get("num_points", 100))
+        max_length = float(params.get("max_length", 1.0))
+        filt = pvs.StreamTracer(Input=src, SeedType=seed_type)
+        filt.MaximumStreamlineLength = max_length
+        if hasattr(filt, "SeedType") and hasattr(filt.SeedType, "NumberOfPoints"):
+            filt.SeedType.NumberOfPoints = num_points
+        view = pvs.GetActiveViewOrCreate("RenderView")
+        pvs.Show(filt, view)
+        return {
+            "input": params["input"],
+            "filter": "StreamTracer",
+            "seed_type": seed_type,
+            "num_points": num_points,
+            "max_length": max_length,
+        }
+
+    def _filter_glyph(self, params: dict) -> dict:
+        pvs = self._import_pv()
+        src = self._find_source(params["input"])
+        glyph_type = params.get("glyph_type", "Arrow")
+        scale_array = params.get("scale_array")
+        scale_factor = float(params.get("scale_factor", 1.0))
+        filt = pvs.Glyph(Input=src, GlyphType=glyph_type)
+        filt.ScaleFactor = scale_factor
+        if scale_array:
+            filt.ScaleArray = ["POINTS", scale_array]
+        view = pvs.GetActiveViewOrCreate("RenderView")
+        pvs.Show(filt, view)
+        return {
+            "input": params["input"],
+            "filter": "Glyph",
+            "glyph_type": glyph_type,
+            "scale_factor": scale_factor,
+        }
+
+    # ------------------------------------------------------------------
     # Python execution handler
     # ------------------------------------------------------------------
 
     def _python_execute(self, params: dict) -> dict:
         from bridge.execution import execute_code  # noqa: PLC0415
         code = params.get("code")
-        if not code:
-            raise ValueError("Missing required parameter 'code'")
+        script_path = params.get("script_path")
+        if not code and not script_path:
+            raise ValueError("Missing required parameter 'code' or 'script_path'")
         args = params.get("args", {})
-        return execute_code(code, args)
+        timeout = params.get("timeout_seconds")
+        return execute_code(
+            code=code,
+            args=args,
+            script_path=script_path,
+            timeout_seconds=timeout,
+        )

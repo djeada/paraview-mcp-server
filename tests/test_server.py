@@ -1,19 +1,26 @@
 """Tests for the ParaView MCP server — tool registration, connection handling, JSON schemas."""
 
+import asyncio
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from paraview_mcp_server.server import (
+    HEADLESS_JOB_MANAGER,
     ParaViewConnection,
+    export_screenshot,
+    job_cancel,
+    job_list,
+    job_status,
     main,
     mcp,
     python_exec,
+    python_exec_async,
     scene_get_info,
     scene_list_sources,
     source_open_file,
-    export_screenshot,
 )
+from paraview_mcp_server.headless import HeadlessPvpythonExecutor
 
 
 class TestToolRegistration:
@@ -35,13 +42,22 @@ class TestToolRegistration:
         assert "paraview_source_delete" in names
         assert "paraview_source_rename" in names
 
-    def test_filter_tools_registered(self):
+    def test_basic_filter_tools_registered(self):
         names = self._get_tool_names()
         for tool in [
             "paraview_filter_slice",
             "paraview_filter_clip",
             "paraview_filter_contour",
             "paraview_filter_threshold",
+        ]:
+            assert tool in names
+
+    def test_advanced_filter_tools_registered(self):
+        names = self._get_tool_names()
+        for tool in [
+            "paraview_filter_calculator",
+            "paraview_filter_stream_tracer",
+            "paraview_filter_glyph",
         ]:
             assert tool in names
 
@@ -52,25 +68,37 @@ class TestToolRegistration:
             "paraview_display_hide",
             "paraview_display_color_by",
             "paraview_display_set_representation",
+            "paraview_display_set_opacity",
+            "paraview_display_rescale_transfer_function",
         ]:
             assert tool in names
 
     def test_view_tools_registered(self):
         names = self._get_tool_names()
         assert "paraview_view_reset_camera" in names
+        assert "paraview_view_set_camera" in names
+        assert "paraview_view_set_background" in names
 
     def test_export_tools_registered(self):
         names = self._get_tool_names()
         assert "paraview_export_screenshot" in names
         assert "paraview_export_data" in names
+        assert "paraview_export_animation" in names
 
-    def test_python_exec_tool_registered(self):
+    def test_python_exec_tools_registered(self):
         names = self._get_tool_names()
         assert "paraview_python_exec" in names
+        assert "paraview_python_exec_async" in names
+
+    def test_job_tools_registered(self):
+        names = self._get_tool_names()
+        assert "paraview_job_status" in names
+        assert "paraview_job_cancel" in names
+        assert "paraview_job_list" in names
 
     def test_total_tool_count(self):
         names = self._get_tool_names()
-        assert len(names) == 19
+        assert len(names) == 31
 
     def test_all_tools_have_descriptions(self):
         for tool in mcp._tool_manager._tools.values():
@@ -225,7 +253,7 @@ class TestMCPToolFunctions:
         )
 
     @pytest.mark.asyncio
-    async def test_python_exec(self):
+    async def test_python_exec_bridge(self):
         ctx, conn = self._make_ctx(
             {"result": {"ok": True}, "stdout": "", "stderr": "", "error": None, "duration_seconds": 0.01}
         )
@@ -234,6 +262,135 @@ class TestMCPToolFunctions:
         conn.send_command.assert_awaited_once_with(
             "python.execute", {"code": "__result__ = {'ok': True}"}
         )
+
+
+class TestHeadlessExecutor:
+    """Test the headless pvpython executor."""
+
+    @pytest.mark.asyncio
+    async def test_execute_parses_structured_payload(self):
+        executor = HeadlessPvpythonExecutor(pvpython_binary="pvpython")
+        payload = {
+            "result": {"ok": True},
+            "stdout": "inner stdout\n",
+            "stderr": "",
+            "error": None,
+            "timed_out": False,
+            "cancelled": False,
+        }
+
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(
+            return_value=(
+                (
+                    "noise before\n"
+                    "__PARAVIEW_MCP_RESULT__=" + json.dumps(payload) + "\n"
+                ).encode(),
+                b"",
+            )
+        )
+        proc.returncode = 0
+
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await executor.execute(code="__result__ = {'ok': True}")
+
+        assert result["result"] == {"ok": True}
+        assert "noise before" in result["stdout"]
+        assert "inner stdout" in result["stdout"]
+        assert result["error"] is None
+
+
+class TestHeadlessTransportTools:
+    """Test tools that support headless transport."""
+
+    @pytest.mark.asyncio
+    async def test_python_exec_uses_headless_transport(self):
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = MagicMock()
+
+        with patch(
+            "paraview_mcp_server.server.HeadlessPvpythonExecutor.execute",
+            new=AsyncMock(return_value={"result": {"mode": "headless"}}),
+        ) as execute:
+            result = await python_exec(
+                ctx,
+                code="__result__ = {'mode': 'headless'}",
+                transport="headless",
+            )
+
+        assert json.loads(result) == {"result": {"mode": "headless"}}
+        execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_headless_async_job_lifecycle(self):
+        HEADLESS_JOB_MANAGER._jobs.clear()
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = MagicMock()
+
+        with patch(
+            "paraview_mcp_server.server.HeadlessPvpythonExecutor.execute",
+            new=AsyncMock(return_value={
+                "result": {"ok": True},
+                "stdout": "",
+                "stderr": "",
+                "error": None,
+                "cancelled": False,
+                "timed_out": False,
+            }),
+        ):
+            created = json.loads(
+                await python_exec_async(ctx, code="__result__ = {'ok': True}")
+            )
+            job_id = created["job_id"]
+            await asyncio.sleep(0)
+            status = json.loads(await job_status(ctx, job_id))
+
+        assert job_id.startswith("headless-job-")
+        assert status["status"] == "succeeded"
+        assert status["result"] == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_job_list_returns_headless_jobs(self):
+        HEADLESS_JOB_MANAGER._jobs.clear()
+        HEADLESS_JOB_MANAGER._jobs["headless-job-1"] = {
+            "job_id": "headless-job-1",
+            "status": "queued",
+            "created_at": 1.0,
+        }
+        ctx = MagicMock()
+        result = json.loads(await job_list(ctx))
+
+        ids = {job["job_id"] for job in result["jobs"]}
+        assert ids == {"headless-job-1"}
+
+    @pytest.mark.asyncio
+    async def test_headless_job_cancel(self):
+        HEADLESS_JOB_MANAGER._jobs.clear()
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = MagicMock()
+
+        async def slow_execute(**_kwargs):
+            await asyncio.sleep(10)
+            return {
+                "result": None,
+                "stdout": "",
+                "stderr": "",
+                "error": None,
+                "cancelled": False,
+                "timed_out": False,
+            }
+
+        with patch(
+            "paraview_mcp_server.server.HeadlessPvpythonExecutor.execute",
+            new=slow_execute,
+        ):
+            created = json.loads(
+                await python_exec_async(ctx, code="pass")
+            )
+            job_id = created["job_id"]
+            cancelled = json.loads(await job_cancel(ctx, job_id))
+
+        assert cancelled["status"] == "cancelled"
 
 
 class TestMCPEntrypoint:

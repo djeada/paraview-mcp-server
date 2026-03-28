@@ -13,7 +13,7 @@ using natural language.
 ```
 MCP Client (Claude Desktop, Codex CLI, …)
       ⇅  stdio
-paraview-mcp-server            ← thin MCP server, defines tools
+paraview-mcp-server            ← thin MCP server, defines 31 tools
       ⇅  JSON / TCP localhost:9876
 ParaView bridge (pvpython)     ← dispatches commands with paraview.simple
       ⇅
@@ -25,6 +25,8 @@ paraview.simple / servermanager
 - The **bridge** runs inside `pvpython`. It receives JSON commands, dispatches them through
   a command registry, calls `paraview.simple`, and returns JSON results.
 - Neither process depends on the other's code at import time.
+- A **headless pvpython executor** lets the MCP server run scripts in a separate
+  `pvpython` process for long-running or async workflows (no bridge needed).
 
 See [`docs/architecture.md`](docs/architecture.md) for a full diagram, protocol reference,
 and tool namespace table.
@@ -86,10 +88,13 @@ Once both processes are running and your MCP client is configured:
 - *"Color the dataset by Pressure."*
 - *"Save a screenshot to `/tmp/view.png`."*
 - *"Apply a contour filter on Pressure with isovalues 0.5 and 1.0."*
+- *"Set the camera to position [10, 5, 5] looking at the origin."*
+- *"Set the background to a gradient from white to dark blue."*
+- *"Export an animation to `/tmp/anim.avi`."*
 
 ---
 
-## Tool reference
+## Tool reference (31 tools)
 
 ### Scene / session
 | Tool | Description |
@@ -106,13 +111,20 @@ Once both processes are running and your MCP client is configured:
 | `paraview_source_delete` | Remove a source from the pipeline |
 | `paraview_source_rename` | Rename a source |
 
-### Filters
+### Filters — basic
 | Tool | Description |
 |---|---|
 | `paraview_filter_slice` | Slice filter with origin + normal |
 | `paraview_filter_clip` | Clip filter with origin + normal |
 | `paraview_filter_contour` | Contour / isosurface by scalar array and values |
 | `paraview_filter_threshold` | Threshold filter by scalar range |
+
+### Filters — advanced
+| Tool | Description |
+|---|---|
+| `paraview_filter_calculator` | Calculator filter with expression |
+| `paraview_filter_stream_tracer` | Stream Tracer for vector field streamlines |
+| `paraview_filter_glyph` | Glyph filter for vector visualization |
 
 ### Display / coloring
 | Tool | Description |
@@ -121,22 +133,35 @@ Once both processes are running and your MCP client is configured:
 | `paraview_display_hide` | Hide a source |
 | `paraview_display_color_by` | Color by a data array |
 | `paraview_display_set_representation` | Surface / Wireframe / Points / Volume |
+| `paraview_display_set_opacity` | Set opacity (0.0 – 1.0) |
+| `paraview_display_rescale_transfer_function` | Rescale color map to data range |
 
 ### Camera / view
 | Tool | Description |
 |---|---|
 | `paraview_view_reset_camera` | Fit all visible sources in the view |
+| `paraview_view_set_camera` | Set camera position, focal point, view-up |
+| `paraview_view_set_background` | Set solid or gradient background color |
 
 ### Export
 | Tool | Description |
 |---|---|
 | `paraview_export_screenshot` | Save a PNG or JPEG screenshot |
 | `paraview_export_data` | Export source data to VTK/CSV/… |
+| `paraview_export_animation` | Export animation to video/frames |
 
 ### Python execution
 | Tool | Description |
 |---|---|
-| `paraview_python_exec` | Run arbitrary Python in the pvpython context |
+| `paraview_python_exec` | Run Python in bridge or headless pvpython |
+| `paraview_python_exec_async` | Start a long-running Python job (headless) |
+
+### Job management
+| Tool | Description |
+|---|---|
+| `paraview_job_status` | Get status of an async job |
+| `paraview_job_cancel` | Cancel a running async job |
+| `paraview_job_list` | List all known async jobs |
 
 ---
 
@@ -144,6 +169,16 @@ Once both processes are running and your MCP client is configured:
 
 `paraview_python_exec` is the escape hatch for workflows that need more than the fixed
 tool set. The script runs in the bridge process where `paraview.simple` is already imported.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `code` | `str` | Inline Python source (mutually exclusive with `script_path`) |
+| `script_path` | `str` | Path to a `.py` file (mutually exclusive with `code`) |
+| `args` | `dict` | Arguments exposed as `args` inside the script |
+| `timeout_seconds` | `int` | Cooperative timeout (default: 30s) |
+| `transport` | `str` | `"bridge"` (default) or `"headless"` (separate pvpython process) |
 
 **Execution namespace:**
 
@@ -173,9 +208,25 @@ schema reference, and more examples.
 
 ---
 
+## Async job execution
+
+For long-running pipelines, use `paraview_python_exec_async`:
+
+1. Start a job → returns `job_id` immediately
+2. Poll with `paraview_job_status` → check `status` field
+3. Cancel with `paraview_job_cancel` if needed
+
+Async jobs run in a separate headless `pvpython` process via `HeadlessPvpythonExecutor`.
+
+---
+
 ## Safety model
 
-- Script output is capped at **50 KB** to prevent memory exhaustion.
+- **Blocked modules** — scripts cannot import `subprocess`, `shutil`, `socket`, `ctypes`,
+  `multiprocessing`, `webbrowser`, or several network-facing stdlib modules.
+- **Output bounding** — stdout/stderr capped at **50 KB**.
+- **Cooperative timeout** — default 30 seconds per script execution.
+- **Script path validation** — optionally restrict execution to approved root directories.
 - The bridge runs inside `pvpython` with the same trust level as a local ParaView session.
 - This is a local desktop automation tool — not a public API sandbox.
 
@@ -216,12 +267,13 @@ paraview-mcp-server/
 ├── src/
 │   └── paraview_mcp_server/
 │       ├── __init__.py          # Re-exports main()
-│       └── server.py            # FastMCP stdio server
+│       ├── server.py            # FastMCP stdio server (31 tools)
+│       └── headless.py          # Headless pvpython executor + job manager
 ├── bridge/
 │   ├── __init__.py
 │   ├── server.py                # TCP socket bridge server
-│   ├── command_handler.py       # Command registry + paraview.simple handlers
-│   └── execution.py             # python.execute helper
+│   ├── command_handler.py       # Command registry + paraview.simple handlers (27 commands)
+│   └── execution.py             # python.execute helper with safety controls
 ├── scripts/
 │   ├── start_paraview_bridge.py
 │   ├── paraview_bridge_request.py
@@ -236,9 +288,9 @@ paraview-mcp-server/
 │   ├── architecture.md
 │   └── python-execute-design.md
 └── tests/
-    ├── test_server.py
-    ├── test_protocol.py
-    └── test_command_handler.py
+    ├── test_server.py           # 31 tools, connection, headless, async jobs
+    ├── test_protocol.py         # Wire encoding, fake bridge integration
+    └── test_command_handler.py  # All 27 handlers + safety controls
 ```
 
 ---

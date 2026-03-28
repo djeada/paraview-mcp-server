@@ -1,199 +1,138 @@
-# ParaView MCP Server — Python Execution Design
+# Python Execution Design
 
 ## Overview
 
-The `paraview_python_exec` tool (bridge command: `python.execute`) lets an AI assistant
-send arbitrary Python code to the ParaView bridge for execution in the `pvpython` context.
-This is the **escape hatch** for advanced workflows that go beyond the fixed tool set.
+The python.execute command (exposed as paraview_python_exec in MCP) provides an
+escape hatch for workflows that require more than the fixed tool set.
 
-## Why it Matters
+Two transports are supported:
 
-ParaView visualization pipelines are highly varied:
+1. **Bridge** (default) - code runs inside the running pvpython bridge process via exec().
+2. **Headless** - code runs in a separate pvpython subprocess via HeadlessPvpythonExecutor.
 
-- Unusual file readers with custom options
-- Multi-step filter pipelines
-- Custom coloring logic and LUT manipulation
-- `servermanager` property tuning
-- Animation frame export loops
-- Batch processing of multiple datasets
+---
 
-A fixed set of high-level tools cannot cover all of these. `paraview_python_exec` provides
-full flexibility while keeping the structured tools for common, well-defined operations.
+## Request schema
 
-## Request Schema
+### Bridge transport
 
-**MCP tool call:**
-```json
-{
-  "name": "paraview_python_exec",
-  "arguments": {
-    "code": "import paraview.simple as pvs\n__result__ = {'sources': list(pvs.GetSources().keys())}",
-    "args": {}
-  }
-}
-```
+    {
+      "id": "uuid-string",
+      "command": "python.execute",
+      "params": {
+        "code": "src = pvs.OpenDataFile(args['filepath'])",
+        "args": { "filepath": "/data/disk.vtu" },
+        "timeout_seconds": 30,
+        "script_path": null
+      }
+    }
 
-**Bridge protocol request:**
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "command": "python.execute",
-  "params": {
-    "code": "...",
-    "args": {}
-  }
-}
-```
+| Field | Type | Required | Description |
+|---|---|---|---|
+| code | str | One of code/script_path | Inline Python source |
+| script_path | str | One of code/script_path | Path to a .py file |
+| args | dict | No | Arguments exposed as args in the script |
+| timeout_seconds | float | No | Cooperative timeout (default: 30s) |
 
-## Response Schema
+---
 
-**Bridge protocol response (success):**
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "success": true,
-  "result": {
-    "result": {"sources": [...]},
-    "stdout": "any printed output\n",
-    "stderr": "",
-    "error": null,
-    "duration_seconds": 0.012
-  }
-}
-```
+## Response schema
 
-**Bridge protocol response (script error):**
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "success": true,
-  "result": {
-    "result": null,
-    "stdout": "",
-    "stderr": "",
-    "error": "Traceback (most recent call last):\n  ...\nValueError: ...",
-    "duration_seconds": 0.003
-  }
-}
-```
+| Field | Type | Description |
+|---|---|---|
+| result | Any | Value of __result__ (JSON-serialisable, or repr() fallback) |
+| stdout | str | Captured stdout (capped at 50 KB) |
+| stderr | str | Captured stderr (capped at 50 KB) |
+| error | str or null | Traceback string on failure, null on success |
+| duration_seconds | float | Wall-clock execution time |
+| timed_out | bool | true if the script exceeded the timeout |
 
-Note: A script-level exception returns `success: true` at the bridge protocol level
-(the command was dispatched successfully) but sets `error` in the inner result dict.
-The MCP tool returns this inner result to the AI assistant as a JSON string.
+Headless transport adds:
 
-## Execution Namespace
+| cancelled | bool | true if the job was cancelled |
 
-The script executes with the following variables pre-populated:
+---
+
+## Execution namespace
 
 | Variable | Type | Description |
 |---|---|---|
-| `pvs` | `module` | `paraview.simple` — the main ParaView Python API |
-| `args` | `dict` | Arguments passed by the caller via the `args` parameter |
-| `__result__` | `Any` | Set this to return a value. Must be JSON-serialisable. |
+| pvs | module or None | paraview.simple (None if ParaView unavailable) |
+| args | dict | Arguments from the request |
+| __result__ | None | Set this to return a value to the caller |
 
-Example:
-```python
-# Accessible in script:
-pvs.GetActiveViewOrCreate("RenderView")
-src = pvs.OpenDataFile(args["filepath"])
-__result__ = {"name": src.GetXMLLabel()}
-```
+---
 
-## Output Capture
+## Safety model
 
-- Both `sys.stdout` and `sys.stderr` are redirected for the duration of the script
-- Output from `print()` calls is captured and returned in `stdout`
-- Stack traces from exceptions are captured in `error`
-- All output is capped at **50 000 characters** to prevent memory exhaustion
+### Blocked modules
 
-## Return Value Handling
+The following modules are blocked during script execution:
+subprocess, shutil, socket, ctypes, multiprocessing, webbrowser,
+http.server, xmlrpc.server, ftplib, smtplib, telnetlib.
 
-- The script sets `__result__` to any JSON-serialisable value
-- If `__result__` is not JSON-serialisable, it is converted to `repr()`
-- If the script does not set `__result__`, it defaults to `None`
+### Output bounding
 
-## Safety Model
+Both stdout and stderr are independently capped at 50 KB.
 
-The bridge operates in a local desktop trust model. The following controls are in place:
+### Cooperative timeout
 
-1. **Output bounding** — stdout/stderr are capped at 50 KB
-2. **No module blocklist by default** — the bridge runs in the same Python process as
-   ParaView and trusts the user; blocking is configurable by modifying `bridge/execution.py`
-3. **Execution timeout** — not enforced by default; can be added by wrapping `execute_code`
-   in a thread with a join timeout
+Default 30 seconds. Bridge transport: thread left running but response
+returned with timed_out: true. Headless: subprocess killed.
 
-This is **not a sandbox**. It provides the same level of isolation as running arbitrary
-Python in a `pvpython` session. Only use it in trusted, local desktop automation workflows.
+### Script path validation
+
+When script_path is used, the file is resolved to an absolute path and
+checked against APPROVED_SCRIPT_ROOTS (empty = no restriction).
+
+### Inline code toggle
+
+Set ALLOW_INLINE_CODE = False in execution.py to disable inline code.
+
+---
+
+## Async execution
+
+Use paraview_python_exec_async for long-running scripts:
+1. Start job -> returns job_id
+2. Poll with paraview_job_status
+3. Cancel with paraview_job_cancel
+
+---
 
 ## Examples
 
-### List all pipeline sources
-```python
-__result__ = {
-    "sources": [
-        {"name": name, "id": str(_id)}
-        for (name, _id) in pvs.GetSources().keys()
-    ]
-}
-```
+### List pipeline sources
+    sources = pvs.GetSources()
+    __result__ = [{"name": n, "id": str(i)} for (n, i), p in sources.items()]
 
-### Open a file and apply a slice
-```python
-src = pvs.OpenDataFile(args["filepath"])
-view = pvs.GetActiveViewOrCreate("RenderView")
-pvs.Show(src, view)
-filt = pvs.Slice(Input=src)
-filt.SliceType.Origin = args.get("origin", [0, 0, 0])
-filt.SliceType.Normal = args.get("normal", [1, 0, 0])
-pvs.Show(filt, view)
-pvs.ResetCamera(view)
-__result__ = {"slice": "created", "origin": filt.SliceType.Origin[:]}
-```
-
-### Color by a scalar array
-```python
-name = args["name"]
-array = args["array"]
-src = next(
-    proxy for (src_name, _id), proxy in pvs.GetSources().items()
-    if src_name == name
-)
-view = pvs.GetActiveViewOrCreate("RenderView")
-display = pvs.GetDisplayProperties(src, view)
-pvs.ColorBy(display, ("POINTS", array))
-pvs.UpdateScalarBars(view)
-__result__ = {"colored_by": array}
-```
-
-### Export a screenshot
-```python
-view = pvs.GetActiveViewOrCreate("RenderView")
-pvs.SaveScreenshot(args["filepath"], view, ImageResolution=[1920, 1080])
-__result__ = {"filepath": args["filepath"]}
-```
-
-### Batch process multiple datasets
-```python
-import os
-results = []
-for f in args["files"]:
-    src = pvs.OpenDataFile(f)
-    if src is None:
-        results.append({"file": f, "error": "could not open"})
-        continue
-    out = f.replace(".vtu", "_screenshot.png")
+### Open file and slice
+    src = pvs.OpenDataFile(args["filepath"])
     view = pvs.GetActiveViewOrCreate("RenderView")
     pvs.Show(src, view)
-    pvs.ResetCamera(view)
-    pvs.SaveScreenshot(out, view, ImageResolution=[800, 600])
-    pvs.Delete(src)
-    results.append({"file": f, "screenshot": out})
-__result__ = {"processed": results}
-```
+    filt = pvs.Slice(Input=src)
+    filt.SliceType.Origin = [0, 0, 0]
+    filt.SliceType.Normal = [1, 0, 0]
+    pvs.Show(filt, view)
+    __result__ = {"done": True}
 
-## Future Work
+### Color by scalar array
+    src = pvs.FindSource(args["name"])
+    view = pvs.GetActiveViewOrCreate("RenderView")
+    display = pvs.GetDisplayProperties(src, view)
+    pvs.ColorBy(display, ("POINTS", args["array"]))
+    __result__ = {"colored_by": args["array"]}
 
-- **Timeout enforcement** via a thread watchdog
-- **Script-path execution** (`script_path` parameter) with path validation
-- **Async execution** for long-running pipelines
-- **Module blocklist** configurable via bridge settings
+### Export screenshot
+    view = pvs.GetActiveViewOrCreate("RenderView")
+    pvs.SaveScreenshot(args["filepath"], view, ImageResolution=[1920, 1080])
+    __result__ = {"filepath": args["filepath"]}
+
+---
+
+## Future work
+
+- Cancellation token (bridge transport) for cooperative cancellation
+- Script library registry for referencing scripts by name
+- Sandboxed execution beyond the blocked-module list
+- Resource limits for memory usage per script

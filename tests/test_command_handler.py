@@ -7,7 +7,9 @@ These tests patch _import_pv so ParaView does not need to be installed.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import types
 from unittest.mock import MagicMock, patch, call
 
@@ -37,6 +39,7 @@ def _make_pv_mock():
     pvs.RenameSource.return_value = None
     pvs.SaveScreenshot.return_value = None
     pvs.SaveData.return_value = None
+    pvs.SaveAnimation.return_value = None
     pvs.ColorBy.return_value = None
     pvs.UpdateScalarBars.return_value = None
     pvs.GetDisplayProperties.return_value = MagicMock()
@@ -66,6 +69,30 @@ def _make_pv_mock():
     threshold_mock.Scalars = None
     threshold_mock.ThresholdRange = []
     pvs.Threshold.return_value = threshold_mock
+
+    # Calculator filter mock
+    calc_mock = MagicMock()
+    calc_mock.Function = ""
+    calc_mock.ResultArrayName = "Result"
+    calc_mock.AttributeType = "Point Data"
+    pvs.Calculator.return_value = calc_mock
+
+    # StreamTracer mock
+    stream_mock = MagicMock()
+    stream_mock.MaximumStreamlineLength = 1.0
+    pvs.StreamTracer.return_value = stream_mock
+
+    # Glyph mock
+    glyph_mock = MagicMock()
+    glyph_mock.ScaleFactor = 1.0
+    pvs.Glyph.return_value = glyph_mock
+
+    # Camera mock for view.set_camera
+    camera_mock = MagicMock()
+    camera_mock.GetPosition.return_value = (1, 2, 3)
+    camera_mock.GetFocalPoint.return_value = (0, 0, 0)
+    camera_mock.GetViewUp.return_value = (0, 1, 0)
+    pvs.GetActiveViewOrCreate.return_value.GetActiveCamera.return_value = camera_mock
 
     return pvs
 
@@ -100,13 +127,21 @@ class TestCommandRouting:
             "display.hide",
             "display.color_by",
             "display.set_representation",
+            "display.set_opacity",
+            "display.rescale_transfer_function",
             "view.reset_camera",
+            "view.set_camera",
+            "view.set_background",
             "export.screenshot",
             "export.data",
+            "export.animation",
             "filter.slice",
             "filter.clip",
             "filter.contour",
             "filter.threshold",
+            "filter.calculator",
+            "filter.stream_tracer",
+            "filter.glyph",
             "python.execute",
         }
         assert set(h._handlers.keys()) == expected
@@ -202,6 +237,18 @@ class TestDisplayHandlers:
         assert result["representation"] == "Wireframe"
         assert display_mock.Representation == "Wireframe"
 
+    def test_display_set_opacity(self, handler):
+        h, pvs = handler
+        display_mock = pvs.GetDisplayProperties.return_value
+        result = h.handle("display.set_opacity", {"name": "disk.ex2", "opacity": 0.5})
+        assert result["opacity"] == 0.5
+        assert display_mock.Opacity == 0.5
+
+    def test_display_rescale_transfer_function(self, handler):
+        h, pvs = handler
+        result = h.handle("display.rescale_transfer_function", {"name": "disk.ex2"})
+        assert result["rescaled"] is True
+
 
 class TestViewHandlers:
     def test_view_reset_camera(self, handler):
@@ -209,6 +256,31 @@ class TestViewHandlers:
         result = h.handle("view.reset_camera", {})
         assert result["reset"] is True
         pvs.ResetCamera.assert_called_once()
+
+    def test_view_set_camera(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "view.set_camera",
+            {"position": [1, 2, 3], "focal_point": [0, 0, 0], "view_up": [0, 1, 0]},
+        )
+        assert result["position"] == [1, 2, 3]
+        assert result["focal_point"] == [0, 0, 0]
+        assert result["view_up"] == [0, 1, 0]
+
+    def test_view_set_background(self, handler):
+        h, pvs = handler
+        view = pvs.GetActiveViewOrCreate.return_value
+        result = h.handle("view.set_background", {"color": [0.1, 0.2, 0.3]})
+        assert result["color"] == [0.1, 0.2, 0.3]
+        assert result["gradient"] is False
+
+    def test_view_set_background_gradient(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "view.set_background",
+            {"color": [0.1, 0.2, 0.3], "color2": [0.9, 0.8, 0.7]},
+        )
+        assert result["gradient"] is True
 
 
 class TestExportHandlers:
@@ -233,8 +305,18 @@ class TestExportHandlers:
         assert result["filepath"] == "/tmp/out.vtu"
         pvs.SaveData.assert_called_once()
 
+    def test_export_animation(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "export.animation",
+            {"filepath": "/tmp/anim.avi", "width": 800, "height": 600, "frame_rate": 30},
+        )
+        assert result["filepath"] == "/tmp/anim.avi"
+        assert result["frame_rate"] == 30
+        pvs.SaveAnimation.assert_called_once()
 
-class TestFilterHandlers:
+
+class TestBasicFilterHandlers:
     def test_filter_slice(self, handler):
         h, pvs = handler
         result = h.handle(
@@ -285,6 +367,57 @@ class TestFilterHandlers:
             h.handle("filter.slice", {"input": "missing"})
 
 
+class TestAdvancedFilterHandlers:
+    def test_filter_calculator(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "filter.calculator",
+            {"input": "disk.ex2", "expression": "Pressure * 2", "result_name": "Doubled"},
+        )
+        assert result["filter"] == "Calculator"
+        assert result["expression"] == "Pressure * 2"
+        assert result["result_name"] == "Doubled"
+        pvs.Calculator.assert_called_once()
+
+    def test_filter_calculator_defaults(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "filter.calculator",
+            {"input": "disk.ex2", "expression": "X"},
+        )
+        assert result["result_name"] == "Result"
+
+    def test_filter_stream_tracer(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "filter.stream_tracer",
+            {"input": "disk.ex2", "num_points": 200, "max_length": 2.0},
+        )
+        assert result["filter"] == "StreamTracer"
+        assert result["num_points"] == 200
+        assert result["max_length"] == 2.0
+        pvs.StreamTracer.assert_called_once()
+
+    def test_filter_glyph(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "filter.glyph",
+            {"input": "disk.ex2", "glyph_type": "Arrow", "scale_factor": 0.5},
+        )
+        assert result["filter"] == "Glyph"
+        assert result["glyph_type"] == "Arrow"
+        assert result["scale_factor"] == 0.5
+        pvs.Glyph.assert_called_once()
+
+    def test_filter_glyph_with_scale_array(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "filter.glyph",
+            {"input": "disk.ex2", "scale_array": "Velocity"},
+        )
+        assert result["filter"] == "Glyph"
+
+
 class TestPythonExecuteHandler:
     def test_python_execute_success(self, handler):
         h, _ = handler
@@ -316,3 +449,59 @@ class TestPythonExecuteHandler:
             {"code": "__result__ = args['x'] + 1", "args": {"x": 41}},
         )
         assert result["result"] == 42
+
+    def test_python_execute_script_path(self, handler):
+        h, _ = handler
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as f:
+            f.write("__result__ = 'from file'")
+            f.flush()
+            try:
+                result = h.handle("python.execute", {"script_path": f.name})
+                assert result["result"] == "from file"
+            finally:
+                os.unlink(f.name)
+
+    def test_python_execute_timeout(self, handler):
+        h, _ = handler
+        result = h.handle(
+            "python.execute",
+            {"code": "import time; time.sleep(10)", "timeout_seconds": 0.2},
+        )
+        assert result["timed_out"] is True
+        assert "timeout" in result["error"].lower()
+
+
+class TestExecutionSafety:
+    """Test the safety controls in bridge/execution.py."""
+
+    def test_blocked_module_import(self):
+        from bridge.execution import execute_code
+        result = execute_code(code="import subprocess")
+        assert result["error"] is not None
+        assert "blocked" in result["error"].lower() or "subprocess" in result["error"]
+
+    def test_output_capping(self):
+        from bridge.execution import _cap_output
+        short = "hello"
+        assert _cap_output(short) == "hello"
+        long_text = "x" * 60_000
+        capped = _cap_output(long_text)
+        assert len(capped) < 60_000
+        assert "truncated" in capped
+
+    def test_script_path_validation_missing_file(self):
+        from bridge.execution import _validate_script_path
+        with pytest.raises(FileNotFoundError):
+            _validate_script_path("/nonexistent/path/script.py")
+
+    def test_code_and_script_path_mutual_exclusion(self):
+        from bridge.execution import execute_code
+        with pytest.raises(ValueError, match="not both"):
+            execute_code(code="pass", script_path="/tmp/x.py")
+
+    def test_neither_code_nor_script_path_raises(self):
+        from bridge.execution import execute_code
+        with pytest.raises(ValueError, match="must be provided"):
+            execute_code()

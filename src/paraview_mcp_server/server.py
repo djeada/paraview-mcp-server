@@ -8,11 +8,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from paraview_mcp_server.headless import HeadlessPvpythonExecutor, HeadlessJobManager
 
 logger = logging.getLogger(__name__)
 
 PARAVIEW_HOST = "127.0.0.1"
 PARAVIEW_PORT = 9876
+HEADLESS_JOB_MANAGER = HeadlessJobManager()
 
 
 class ParaViewConnection:
@@ -93,7 +95,9 @@ def _get_conn(ctx: Context) -> ParaViewConnection:
     return ctx.request_context.lifespan_context
 
 
-# -- Scene / session tools --
+# ======================================================================
+# Scene / session tools
+# ======================================================================
 
 
 @mcp.tool(
@@ -134,7 +138,9 @@ async def source_get_properties(ctx: Context, name: str) -> str:
     return json.dumps(result, indent=2)
 
 
-# -- Data loading tools --
+# ======================================================================
+# Data loading tools
+# ======================================================================
 
 
 @mcp.tool(
@@ -168,7 +174,9 @@ async def source_rename(ctx: Context, name: str, new_name: str) -> str:
     return json.dumps(result, indent=2)
 
 
-# -- Filter tools --
+# ======================================================================
+# Filter tools — basic
+# ======================================================================
 
 
 @mcp.tool(
@@ -257,7 +265,92 @@ async def filter_threshold(
     return json.dumps(result, indent=2)
 
 
-# -- Display / coloring tools --
+# ======================================================================
+# Filter tools — advanced
+# ======================================================================
+
+
+@mcp.tool(
+    name="paraview_filter_calculator",
+    description=(
+        "Apply a Calculator filter to a named source. "
+        "Provide a mathematical expression (e.g. 'Pressure * 2') and an "
+        "optional result array name (default: 'Result')."
+    ),
+)
+async def filter_calculator(
+    ctx: Context,
+    input: str,
+    expression: str,
+    result_name: str = "Result",
+    attribute_type: str = "Point Data",
+) -> str:
+    result = await _get_conn(ctx).send_command(
+        "filter.calculator",
+        {
+            "input": input,
+            "expression": expression,
+            "result_name": result_name,
+            "attribute_type": attribute_type,
+        },
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="paraview_filter_stream_tracer",
+    description=(
+        "Apply a Stream Tracer filter to a named vector source. "
+        "Generates streamlines from seed points."
+    ),
+)
+async def filter_stream_tracer(
+    ctx: Context,
+    input: str,
+    seed_type: str = "Point Cloud",
+    num_points: int = 100,
+    max_length: float = 1.0,
+) -> str:
+    result = await _get_conn(ctx).send_command(
+        "filter.stream_tracer",
+        {
+            "input": input,
+            "seed_type": seed_type,
+            "num_points": num_points,
+            "max_length": max_length,
+        },
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="paraview_filter_glyph",
+    description=(
+        "Apply a Glyph filter to a named source. "
+        "Glyphs visualize vector data using arrows, spheres, etc."
+    ),
+)
+async def filter_glyph(
+    ctx: Context,
+    input: str,
+    glyph_type: str = "Arrow",
+    scale_array: str | None = None,
+    scale_factor: float = 1.0,
+) -> str:
+    params: dict[str, Any] = {
+        "input": input,
+        "glyph_type": glyph_type,
+        "scale_factor": scale_factor,
+    }
+    if scale_array is not None:
+        params["scale_array"] = scale_array
+    result = await _get_conn(ctx).send_command("filter.glyph", params)
+    return json.dumps(result, indent=2)
+
+
+# ======================================================================
+# Display / coloring tools
+# ======================================================================
 
 
 @mcp.tool(
@@ -318,7 +411,31 @@ async def display_set_representation(
     return json.dumps(result, indent=2)
 
 
-# -- View / camera tools --
+@mcp.tool(
+    name="paraview_display_set_opacity",
+    description="Set the opacity (0.0 = fully transparent, 1.0 = fully opaque) of a named source.",
+)
+async def display_set_opacity(ctx: Context, name: str, opacity: float) -> str:
+    result = await _get_conn(ctx).send_command(
+        "display.set_opacity", {"name": name, "opacity": opacity}
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="paraview_display_rescale_transfer_function",
+    description="Rescale the color transfer function of a named source to fit the current data range.",
+)
+async def display_rescale_transfer_function(ctx: Context, name: str) -> str:
+    result = await _get_conn(ctx).send_command(
+        "display.rescale_transfer_function", {"name": name}
+    )
+    return json.dumps(result, indent=2)
+
+
+# ======================================================================
+# View / camera tools
+# ======================================================================
 
 
 @mcp.tool(
@@ -330,7 +447,56 @@ async def view_reset_camera(ctx: Context) -> str:
     return json.dumps(result, indent=2)
 
 
-# -- Export tools --
+@mcp.tool(
+    name="paraview_view_set_camera",
+    description=(
+        "Set the camera position, focal point, and view-up vector. "
+        "Each parameter is a [x, y, z] list. Optionally set parallel_scale for orthographic views."
+    ),
+)
+async def view_set_camera(
+    ctx: Context,
+    position: list[float] | None = None,
+    focal_point: list[float] | None = None,
+    view_up: list[float] | None = None,
+    parallel_scale: float | None = None,
+) -> str:
+    params: dict[str, Any] = {}
+    if position is not None:
+        params["position"] = position
+    if focal_point is not None:
+        params["focal_point"] = focal_point
+    if view_up is not None:
+        params["view_up"] = view_up
+    if parallel_scale is not None:
+        params["parallel_scale"] = parallel_scale
+    result = await _get_conn(ctx).send_command("view.set_camera", params)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="paraview_view_set_background",
+    description=(
+        "Set the background color of the active render view. "
+        "Provide color as [r, g, b] with values 0-1. "
+        "Optionally provide color2 for a gradient background."
+    ),
+)
+async def view_set_background(
+    ctx: Context,
+    color: list[float],
+    color2: list[float] | None = None,
+) -> str:
+    params: dict[str, Any] = {"color": color}
+    if color2 is not None:
+        params["color2"] = color2
+    result = await _get_conn(ctx).send_command("view.set_background", params)
+    return json.dumps(result, indent=2)
+
+
+# ======================================================================
+# Export tools
+# ======================================================================
 
 
 @mcp.tool(
@@ -367,27 +533,132 @@ async def export_data(ctx: Context, name: str, filepath: str) -> str:
     return json.dumps(result, indent=2)
 
 
-# -- Python execution tool --
+@mcp.tool(
+    name="paraview_export_animation",
+    description=(
+        "Export an animation of the current ParaView scene. "
+        "The output format is determined by the file extension (e.g. .avi, .ogv, .png for frame series). "
+        "Default resolution is 1920×1080, frame rate 15 fps."
+    ),
+)
+async def export_animation(
+    ctx: Context,
+    filepath: str,
+    width: int = 1920,
+    height: int = 1080,
+    frame_rate: int = 15,
+) -> str:
+    result = await _get_conn(ctx).send_command(
+        "export.animation",
+        {"filepath": filepath, "width": width, "height": height, "frame_rate": frame_rate},
+    )
+    return json.dumps(result, indent=2)
+
+
+# ======================================================================
+# Python execution tools
+# ======================================================================
 
 
 @mcp.tool(
     name="paraview_python_exec",
     description=(
-        "Execute a Python script in the ParaView bridge context. "
+        "Execute a Python script in the ParaView bridge context synchronously. "
+        "Provide either 'code' (inline Python string) or 'script_path' (path to a .py file), not both. "
         "The script has access to 'paraview.simple' as 'pvs' and an 'args' dict "
         "with any supplied arguments. Set '__result__' to return a JSON-serializable value. "
-        "Returns result, stdout, stderr, error, and execution duration."
+        "Returns result, stdout, stderr, error, and execution duration. "
+        "Use transport='bridge' for the live bridge session, or transport='headless' "
+        "to run in a separate pvpython process."
     ),
 )
 async def python_exec(
     ctx: Context,
-    code: str,
+    code: str | None = None,
+    script_path: str | None = None,
     args: dict | None = None,
+    timeout_seconds: int | None = None,
+    transport: str = "bridge",
 ) -> str:
-    params: dict[str, Any] = {"code": code}
-    if args is not None:
-        params["args"] = args
-    result = await _get_conn(ctx).send_command("python.execute", params)
+    if transport == "headless":
+        executor = HeadlessPvpythonExecutor()
+        result = await executor.execute(
+            code=code,
+            script_path=script_path,
+            args=args,
+            timeout_seconds=timeout_seconds,
+        )
+    else:
+        params: dict[str, Any] = {}
+        if code is not None:
+            params["code"] = code
+        if script_path is not None:
+            params["script_path"] = script_path
+        if args is not None:
+            params["args"] = args
+        if timeout_seconds is not None:
+            params["timeout_seconds"] = timeout_seconds
+        result = await _get_conn(ctx).send_command("python.execute", params)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="paraview_python_exec_async",
+    description=(
+        "Start a long-running Python script in ParaView asynchronously. "
+        "Same parameters as paraview_python_exec. Returns a job_id immediately. "
+        "Use paraview_job_status to poll for completion, and paraview_job_cancel to abort. "
+        "Uses transport='headless' to run in a separate pvpython process."
+    ),
+)
+async def python_exec_async(
+    ctx: Context,
+    code: str | None = None,
+    script_path: str | None = None,
+    args: dict | None = None,
+    timeout_seconds: int | None = None,
+) -> str:
+    executor = HeadlessPvpythonExecutor()
+    job_id = await HEADLESS_JOB_MANAGER.create_job(
+        executor,
+        code=code,
+        script_path=script_path,
+        args=args,
+        timeout_seconds=timeout_seconds,
+    )
+    return json.dumps({"job_id": job_id}, indent=2)
+
+
+@mcp.tool(
+    name="paraview_job_status",
+    description=(
+        "Get the status of an async ParaView job. Returns job_id, status "
+        "(queued/running/succeeded/failed/cancelled), timestamps, result, stdout, stderr, and error. "
+        "Poll this after starting a job with paraview_python_exec_async."
+    ),
+)
+async def job_status(ctx: Context, job_id: str) -> str:
+    result = HEADLESS_JOB_MANAGER.get_status(job_id)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="paraview_job_cancel",
+    description=(
+        "Cancel a running or queued async ParaView job."
+    ),
+)
+async def job_cancel(ctx: Context, job_id: str) -> str:
+    result = await HEADLESS_JOB_MANAGER.cancel(job_id)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="paraview_job_list",
+    description="List known async ParaView jobs with their IDs, statuses, and creation timestamps.",
+)
+async def job_list(ctx: Context) -> str:
+    result = HEADLESS_JOB_MANAGER.list_jobs()
     return json.dumps(result, indent=2)
 
 
