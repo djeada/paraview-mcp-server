@@ -5,6 +5,7 @@ Expected args:
     width (int): Image width in pixels (default 1920).
     height (int): Image height in pixels (default 1080).
 """
+
 from paraview.simple import GetActiveViewOrCreate, SaveScreenshot
 
 filepath = args["filepath"]

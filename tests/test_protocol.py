@@ -61,9 +61,7 @@ class FakeBridgeServer:
                     if not chunk:
                         return
                     buffer += chunk
-                conn.sendall(
-                    (json.dumps(self._response) + "\n").encode("utf-8")
-                )
+                conn.sendall((json.dumps(self._response) + "\n").encode("utf-8"))
             finally:
                 conn.close()
 

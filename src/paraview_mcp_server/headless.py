@@ -8,6 +8,7 @@ the ``HeadlessBlenderExecutor`` from the Blender MCP server.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import tempfile
@@ -42,7 +43,7 @@ def _extract_payload(stdout: str) -> tuple[dict[str, Any] | None, str]:
     clean_lines: list[str] = []
     for line in stdout.splitlines():
         if line.startswith(RESULT_PREFIX):
-            payload = json.loads(line[len(RESULT_PREFIX):])
+            payload = json.loads(line[len(RESULT_PREFIX) :])
         else:
             clean_lines.append(line)
     cleaned = "\n".join(clean_lines)
@@ -106,9 +107,7 @@ class HeadlessPvpythonExecutor:
     """Run ParaView scripts in a separate headless ``pvpython`` process."""
 
     def __init__(self, pvpython_binary: str | None = None):
-        self.pvpython_binary = (
-            pvpython_binary or os.environ.get("PVPYTHON_BIN", "pvpython")
-        )
+        self.pvpython_binary = pvpython_binary or os.environ.get("PVPYTHON_BIN", "pvpython")
 
     async def execute(
         self,
@@ -138,9 +137,7 @@ class HeadlessPvpythonExecutor:
 
             code_path.write_text(code or "", encoding="utf-8")
             args_path.write_text(json.dumps(args), encoding="utf-8")
-            wrapper_path.write_text(
-                _build_wrapper_script(code_path, args_path), encoding="utf-8"
-            )
+            wrapper_path.write_text(_build_wrapper_script(code_path, args_path), encoding="utf-8")
 
             cmd = [self.pvpython_binary, str(wrapper_path)]
 
@@ -155,11 +152,7 @@ class HeadlessPvpythonExecutor:
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
                     proc.communicate(),
-                    timeout=(
-                        timeout_seconds
-                        if timeout_seconds and timeout_seconds > 0
-                        else None
-                    ),
+                    timeout=(timeout_seconds if timeout_seconds and timeout_seconds > 0 else None),
                 )
             except asyncio.TimeoutError:
                 proc.kill()
@@ -194,10 +187,7 @@ class HeadlessPvpythonExecutor:
         payload, clean_stdout = _extract_payload(stdout)
 
         if payload is None:
-            error = (
-                f"Headless pvpython exited with code {proc.returncode} "
-                f"without a result payload"
-            )
+            error = f"Headless pvpython exited with code {proc.returncode} without a result payload"
             if stderr.strip():
                 error = f"{error}\n{stderr.strip()}"
             return {
@@ -322,10 +312,8 @@ class HeadlessJobManager:
         task = job.get("task")
         if task is not None and not task.done():
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         if job["status"] in {"queued", "running"}:
             job["status"] = "cancelled"
             job["completed_at"] = time.time()

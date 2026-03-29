@@ -54,6 +54,7 @@ DEFAULT_TIMEOUT_SECONDS: float = 30.0
 # Import hook that blocks dangerous modules during script execution
 # ---------------------------------------------------------------------------
 
+
 class _BlockedImportFinder(importlib.abc.MetaPathFinder):
     """Raises ``ImportError`` for modules in the *blocked* set."""
 
@@ -69,15 +70,11 @@ class _BlockedImportFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname: str, path=None, target=None):
         """Raise ``ImportError`` for blocked modules (modern import hook)."""
         if self._active and fullname in self._blocked:
-            raise ImportError(
-                f"Module {fullname!r} is blocked during ParaView MCP script execution"
-            )
+            raise ImportError(f"Module {fullname!r} is blocked during ParaView MCP script execution")
         return None
 
     def load_module(self, fullname: str):
-        raise ImportError(
-            f"Module {fullname!r} is blocked during ParaView MCP script execution"
-        )
+        raise ImportError(f"Module {fullname!r} is blocked during ParaView MCP script execution")
 
 
 _BLOCKER = _BlockedImportFinder()
@@ -111,6 +108,7 @@ def _remove_import_blocker(hidden: dict[str, Any]) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _cap_output(text: str, limit: int = MAX_OUTPUT_SIZE) -> str:
     if len(text) <= limit:
         return text
@@ -137,16 +135,14 @@ def _validate_script_path(script_path: str) -> str:
         for root in APPROVED_SCRIPT_ROOTS:
             if resolved.startswith(str(Path(root).resolve())):
                 return resolved
-        raise PermissionError(
-            f"Script {resolved!r} is not under any approved root: "
-            f"{APPROVED_SCRIPT_ROOTS!r}"
-        )
+        raise PermissionError(f"Script {resolved!r} is not under any approved root: {APPROVED_SCRIPT_ROOTS!r}")
     return resolved
 
 
 # ---------------------------------------------------------------------------
 # Core execution
 # ---------------------------------------------------------------------------
+
 
 def execute_code(
     code: str | None = None,
@@ -173,9 +169,7 @@ def execute_code(
     if not code and not script_path:
         raise ValueError("Either 'code' or 'script_path' must be provided")
     if code and not ALLOW_INLINE_CODE:
-        raise PermissionError(
-            "Inline code execution is disabled; use script_path instead"
-        )
+        raise PermissionError("Inline code execution is disabled; use script_path instead")
 
     if script_path:
         resolved = _validate_script_path(script_path)
@@ -210,9 +204,7 @@ def execute_code(
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
                 exec(compile(code, "<paraview-mcp-script>", "exec"), namespace)  # noqa: S102
         except Exception as exc:
-            result_holder["error"] = "".join(
-                traceback.format_exception(type(exc), exc, exc.__traceback__)
-            )
+            result_holder["error"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         finally:
             _remove_import_blocker(hidden)
 

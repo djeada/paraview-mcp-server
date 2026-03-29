@@ -2,9 +2,11 @@
 
 import asyncio
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from paraview_mcp_server.headless import HeadlessPvpythonExecutor
 from paraview_mcp_server.server import (
     HEADLESS_JOB_MANAGER,
     ParaViewConnection,
@@ -20,7 +22,6 @@ from paraview_mcp_server.server import (
     scene_list_sources,
     source_open_file,
 )
-from paraview_mcp_server.headless import HeadlessPvpythonExecutor
 
 
 class TestToolRegistration:
@@ -120,9 +121,7 @@ class TestParaViewConnection:
         response = {"id": "test-id", "success": True, "result": {"source_count": 3}}
 
         mock_reader = AsyncMock()
-        mock_reader.readline = AsyncMock(
-            return_value=json.dumps(response).encode() + b"\n"
-        )
+        mock_reader.readline = AsyncMock(return_value=json.dumps(response).encode() + b"\n")
         mock_writer = AsyncMock()
         mock_writer.write = MagicMock()
         mock_writer.drain = AsyncMock()
@@ -139,9 +138,7 @@ class TestParaViewConnection:
         response = {"id": "test-id", "success": False, "error": "Source not found"}
 
         mock_reader = AsyncMock()
-        mock_reader.readline = AsyncMock(
-            return_value=json.dumps(response).encode() + b"\n"
-        )
+        mock_reader.readline = AsyncMock(return_value=json.dumps(response).encode() + b"\n")
         mock_writer = AsyncMock()
         mock_writer.write = MagicMock()
         mock_writer.drain = AsyncMock()
@@ -180,9 +177,7 @@ class TestParaViewConnection:
         response = {"id": "test-id", "success": True, "result": {}}
 
         mock_reader = AsyncMock()
-        mock_reader.readline = AsyncMock(
-            return_value=json.dumps(response).encode() + b"\n"
-        )
+        mock_reader.readline = AsyncMock(return_value=json.dumps(response).encode() + b"\n")
         mock_writer = AsyncMock()
         mock_writer.write = MagicMock()
         mock_writer.drain = AsyncMock()
@@ -234,18 +229,12 @@ class TestMCPToolFunctions:
         ctx, conn = self._make_ctx({"name": "disk_out_ref.ex2", "filepath": "/data/disk.ex2"})
         result = json.loads(await source_open_file(ctx, filepath="/data/disk.ex2"))
         assert result["filepath"] == "/data/disk.ex2"
-        conn.send_command.assert_awaited_once_with(
-            "source.open_file", {"filepath": "/data/disk.ex2"}
-        )
+        conn.send_command.assert_awaited_once_with("source.open_file", {"filepath": "/data/disk.ex2"})
 
     @pytest.mark.asyncio
     async def test_export_screenshot(self):
-        ctx, conn = self._make_ctx(
-            {"filepath": "/tmp/shot.png", "resolution": [1920, 1080]}
-        )
-        result = json.loads(
-            await export_screenshot(ctx, filepath="/tmp/shot.png", width=1920, height=1080)
-        )
+        ctx, conn = self._make_ctx({"filepath": "/tmp/shot.png", "resolution": [1920, 1080]})
+        result = json.loads(await export_screenshot(ctx, filepath="/tmp/shot.png", width=1920, height=1080))
         assert result["resolution"] == [1920, 1080]
         conn.send_command.assert_awaited_once_with(
             "export.screenshot",
@@ -259,9 +248,7 @@ class TestMCPToolFunctions:
         )
         result = json.loads(await python_exec(ctx, code="__result__ = {'ok': True}"))
         assert result["result"] == {"ok": True}
-        conn.send_command.assert_awaited_once_with(
-            "python.execute", {"code": "__result__ = {'ok': True}"}
-        )
+        conn.send_command.assert_awaited_once_with("python.execute", {"code": "__result__ = {'ok': True}"})
 
 
 class TestHeadlessExecutor:
@@ -282,10 +269,7 @@ class TestHeadlessExecutor:
         proc = AsyncMock()
         proc.communicate = AsyncMock(
             return_value=(
-                (
-                    "noise before\n"
-                    "__PARAVIEW_MCP_RESULT__=" + json.dumps(payload) + "\n"
-                ).encode(),
+                ("noise before\n__PARAVIEW_MCP_RESULT__=" + json.dumps(payload) + "\n").encode(),
                 b"",
             )
         )
@@ -329,18 +313,18 @@ class TestHeadlessTransportTools:
 
         with patch(
             "paraview_mcp_server.server.HeadlessPvpythonExecutor.execute",
-            new=AsyncMock(return_value={
-                "result": {"ok": True},
-                "stdout": "",
-                "stderr": "",
-                "error": None,
-                "cancelled": False,
-                "timed_out": False,
-            }),
+            new=AsyncMock(
+                return_value={
+                    "result": {"ok": True},
+                    "stdout": "",
+                    "stderr": "",
+                    "error": None,
+                    "cancelled": False,
+                    "timed_out": False,
+                }
+            ),
         ):
-            created = json.loads(
-                await python_exec_async(ctx, code="__result__ = {'ok': True}")
-            )
+            created = json.loads(await python_exec_async(ctx, code="__result__ = {'ok': True}"))
             job_id = created["job_id"]
             await asyncio.sleep(0)
             status = json.loads(await job_status(ctx, job_id))
@@ -384,9 +368,7 @@ class TestHeadlessTransportTools:
             "paraview_mcp_server.server.HeadlessPvpythonExecutor.execute",
             new=slow_execute,
         ):
-            created = json.loads(
-                await python_exec_async(ctx, code="pass")
-            )
+            created = json.loads(await python_exec_async(ctx, code="pass"))
             job_id = created["job_id"]
             cancelled = json.loads(await job_cancel(ctx, job_id))
 

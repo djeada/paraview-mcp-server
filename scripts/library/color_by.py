@@ -5,6 +5,7 @@ Expected args:
     array (str): Array name.
     association (str): 'POINTS' or 'CELLS' (default 'POINTS').
 """
+
 from paraview.simple import (
     ColorBy,
     GetActiveViewOrCreate,

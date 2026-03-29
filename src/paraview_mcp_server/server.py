@@ -8,7 +8,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
-from paraview_mcp_server.headless import HeadlessPvpythonExecutor, HeadlessJobManager
+
+from paraview_mcp_server.headless import HeadlessJobManager, HeadlessPvpythonExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,9 @@ class ParaViewConnection:
         if not self._writer:
             await self.connect()
 
+        assert self._reader is not None
+        assert self._writer is not None
+
         request = {
             "id": str(uuid.uuid4()),
             "command": command,
@@ -60,9 +64,7 @@ class ParaViewConnection:
 
                 response = json.loads(line)
                 if not response.get("success"):
-                    raise RuntimeError(
-                        response.get("error", "Unknown error from ParaView bridge")
-                    )
+                    raise RuntimeError(response.get("error", "Unknown error from ParaView bridge"))
                 return response.get("result")
             except (ConnectionError, OSError) as e:
                 self._writer = None
@@ -77,9 +79,7 @@ async def paraview_lifespan(server: FastMCP):
     try:
         await conn.connect()
     except OSError:
-        logger.warning(
-            "Could not connect to ParaView bridge on startup. Will retry on first tool call."
-        )
+        logger.warning("Could not connect to ParaView bridge on startup. Will retry on first tool call.")
     yield conn
     await conn.disconnect()
 
@@ -92,7 +92,7 @@ mcp = FastMCP(
 
 
 def _get_conn(ctx: Context) -> ParaViewConnection:
-    return ctx.request_context.lifespan_context
+    return ctx.request_context.lifespan_context  # type: ignore[no-any-return]
 
 
 # ======================================================================
@@ -132,9 +132,7 @@ async def scene_list_views(ctx: Context) -> str:
     description="Get the properties and metadata of a named source in the ParaView pipeline.",
 )
 async def source_get_properties(ctx: Context, name: str) -> str:
-    result = await _get_conn(ctx).send_command(
-        "source.get_properties", {"name": name}
-    )
+    result = await _get_conn(ctx).send_command("source.get_properties", {"name": name})
     return json.dumps(result, indent=2)
 
 
@@ -148,9 +146,7 @@ async def source_get_properties(ctx: Context, name: str) -> str:
     description="Open a supported dataset file (VTK, VTU, VTS, ExodusII, CSV, etc.) in ParaView.",
 )
 async def source_open_file(ctx: Context, filepath: str) -> str:
-    result = await _get_conn(ctx).send_command(
-        "source.open_file", {"filepath": filepath}
-    )
+    result = await _get_conn(ctx).send_command("source.open_file", {"filepath": filepath})
     return json.dumps(result, indent=2)
 
 
@@ -168,9 +164,7 @@ async def source_delete(ctx: Context, name: str) -> str:
     description="Rename a source in the ParaView pipeline.",
 )
 async def source_rename(ctx: Context, name: str, new_name: str) -> str:
-    result = await _get_conn(ctx).send_command(
-        "source.rename", {"name": name, "new_name": new_name}
-    )
+    result = await _get_conn(ctx).send_command("source.rename", {"name": name, "new_name": new_name})
     return json.dumps(result, indent=2)
 
 
@@ -238,17 +232,14 @@ async def filter_contour(
     array: str,
     values: list[float],
 ) -> str:
-    result = await _get_conn(ctx).send_command(
-        "filter.contour", {"input": input, "array": array, "values": values}
-    )
+    result = await _get_conn(ctx).send_command("filter.contour", {"input": input, "array": array, "values": values})
     return json.dumps(result, indent=2)
 
 
 @mcp.tool(
     name="paraview_filter_threshold",
     description=(
-        "Apply a Threshold filter to a named source. "
-        "Keep cells where the scalar array falls within [lower, upper]."
+        "Apply a Threshold filter to a named source. Keep cells where the scalar array falls within [lower, upper]."
     ),
 )
 async def filter_threshold(
@@ -299,10 +290,7 @@ async def filter_calculator(
 
 @mcp.tool(
     name="paraview_filter_stream_tracer",
-    description=(
-        "Apply a Stream Tracer filter to a named vector source. "
-        "Generates streamlines from seed points."
-    ),
+    description=("Apply a Stream Tracer filter to a named vector source. Generates streamlines from seed points."),
 )
 async def filter_stream_tracer(
     ctx: Context,
@@ -325,10 +313,7 @@ async def filter_stream_tracer(
 
 @mcp.tool(
     name="paraview_filter_glyph",
-    description=(
-        "Apply a Glyph filter to a named source. "
-        "Glyphs visualize vector data using arrows, spheres, etc."
-    ),
+    description=("Apply a Glyph filter to a named source. Glyphs visualize vector data using arrows, spheres, etc."),
 )
 async def filter_glyph(
     ctx: Context,
@@ -401,9 +386,7 @@ async def display_color_by(
         "Supported types: Surface, Wireframe, Points, Surface With Edges, Volume."
     ),
 )
-async def display_set_representation(
-    ctx: Context, name: str, representation: str
-) -> str:
+async def display_set_representation(ctx: Context, name: str, representation: str) -> str:
     result = await _get_conn(ctx).send_command(
         "display.set_representation",
         {"name": name, "representation": representation},
@@ -416,9 +399,7 @@ async def display_set_representation(
     description="Set the opacity (0.0 = fully transparent, 1.0 = fully opaque) of a named source.",
 )
 async def display_set_opacity(ctx: Context, name: str, opacity: float) -> str:
-    result = await _get_conn(ctx).send_command(
-        "display.set_opacity", {"name": name, "opacity": opacity}
-    )
+    result = await _get_conn(ctx).send_command("display.set_opacity", {"name": name, "opacity": opacity})
     return json.dumps(result, indent=2)
 
 
@@ -427,9 +408,7 @@ async def display_set_opacity(ctx: Context, name: str, opacity: float) -> str:
     description="Rescale the color transfer function of a named source to fit the current data range.",
 )
 async def display_rescale_transfer_function(ctx: Context, name: str) -> str:
-    result = await _get_conn(ctx).send_command(
-        "display.rescale_transfer_function", {"name": name}
-    )
+    result = await _get_conn(ctx).send_command("display.rescale_transfer_function", {"name": name})
     return json.dumps(result, indent=2)
 
 
@@ -527,9 +506,7 @@ async def export_screenshot(
     ),
 )
 async def export_data(ctx: Context, name: str, filepath: str) -> str:
-    result = await _get_conn(ctx).send_command(
-        "export.data", {"name": name, "filepath": filepath}
-    )
+    result = await _get_conn(ctx).send_command("export.data", {"name": name, "filepath": filepath})
     return json.dumps(result, indent=2)
 
 
@@ -644,9 +621,7 @@ async def job_status(ctx: Context, job_id: str) -> str:
 
 @mcp.tool(
     name="paraview_job_cancel",
-    description=(
-        "Cancel a running or queued async ParaView job."
-    ),
+    description=("Cancel a running or queued async ParaView job."),
 )
 async def job_cancel(ctx: Context, job_id: str) -> str:
     result = await HEADLESS_JOB_MANAGER.cancel(job_id)

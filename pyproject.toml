@@ -28,6 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=1.0.0",
+    "pydantic>=2.0",
 ]
 
 [project.urls]
@@ -39,6 +40,9 @@ Issues = "https://github.com/djeada/paraview-mcp-server/issues"
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "pytest-cov>=6.0",
+    "ruff>=0.11",
+    "mypy>=1.15",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -61,3 +65,51 @@ paraview-mcp-server = "paraview_mcp_server:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+addopts = "--cov=paraview_mcp_server --cov=bridge --cov-report=term-missing --cov-report=xml:coverage.xml"
+
+[tool.coverage.run]
+source = ["src/paraview_mcp_server", "bridge"]
+
+[tool.coverage.report]
+fail_under = 50
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "TCH",   # flake8-type-checking
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "SIM108", # ternary operator
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/library/*.py" = ["F821"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["paraview_mcp_server"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true

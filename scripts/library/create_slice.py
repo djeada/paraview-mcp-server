@@ -5,6 +5,7 @@ Expected args:
     origin (list[float]): [x, y, z] origin of the slice plane (default [0, 0, 0]).
     normal (list[float]): [nx, ny, nz] normal of the slice plane (default [1, 0, 0]).
 """
+
 from paraview.simple import GetActiveViewOrCreate, GetSources, Show, Slice
 
 input_name = args["input"]

@@ -5,6 +5,7 @@ Expected args:
     array (str): Scalar array name to contour by.
     values (list[float]): One or more isovalues.
 """
+
 from paraview.simple import Contour, GetActiveViewOrCreate, GetSources, Show
 
 input_name = args["input"]

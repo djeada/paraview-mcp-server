@@ -5,6 +5,7 @@ Set __result__ to a summary dict that the bridge returns as the tool result.
 Expected args:
     filepath (str): Absolute path to the data file.
 """
+
 from paraview.simple import GetActiveViewOrCreate, OpenDataFile, ResetCamera, Show
 
 filepath = args["filepath"]

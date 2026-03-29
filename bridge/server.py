@@ -27,6 +27,7 @@ class ParaViewBridgeServer:
         self._running = False
         # Import here so the bridge module can be imported without paraview installed.
         from bridge.command_handler import CommandHandler
+
         self._handler = CommandHandler()
         self._request_queue: queue.Queue[dict[str, Any]] = queue.Queue()
 
@@ -55,12 +56,11 @@ class ParaViewBridgeServer:
     def _accept_loop(self):
         while self._running:
             try:
+                assert self._server_socket is not None
                 conn, addr = self._server_socket.accept()
                 logger.info("Client connected from %s", addr)
-                threading.Thread(
-                    target=self._handle_client, args=(conn,), daemon=True
-                ).start()
-            except socket.timeout:
+                threading.Thread(target=self._handle_client, args=(conn,), daemon=True).start()
+            except TimeoutError:
                 continue
             except OSError:
                 break

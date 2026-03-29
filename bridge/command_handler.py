@@ -8,9 +8,65 @@ is available.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
+
+from bridge.models import (
+    DisplayColorByParams,
+    DisplaySetOpacityParams,
+    DisplaySetRepresentationParams,
+    ExportAnimationParams,
+    ExportDataParams,
+    ExportScreenshotParams,
+    FilterCalculatorParams,
+    FilterClipParams,
+    FilterContourParams,
+    FilterGlyphParams,
+    FilterSliceParams,
+    FilterStreamTracerParams,
+    FilterThresholdParams,
+    JobIdParams,
+    PythonExecuteParams,
+    SourceNameParams,
+    SourceOpenFileParams,
+    SourceRenameParams,
+    ViewSetBackgroundParams,
+    ViewSetCameraParams,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+_VALIDATORS: dict[str, type[BaseModel]] = {
+    "source.get_properties": SourceNameParams,
+    "source.open_file": SourceOpenFileParams,
+    "source.delete": SourceNameParams,
+    "source.rename": SourceRenameParams,
+    "display.show": SourceNameParams,
+    "display.hide": SourceNameParams,
+    "display.color_by": DisplayColorByParams,
+    "display.set_representation": DisplaySetRepresentationParams,
+    "display.set_opacity": DisplaySetOpacityParams,
+    "display.rescale_transfer_function": SourceNameParams,
+    "view.set_camera": ViewSetCameraParams,
+    "view.set_background": ViewSetBackgroundParams,
+    "export.screenshot": ExportScreenshotParams,
+    "export.data": ExportDataParams,
+    "export.animation": ExportAnimationParams,
+    "filter.slice": FilterSliceParams,
+    "filter.clip": FilterClipParams,
+    "filter.contour": FilterContourParams,
+    "filter.threshold": FilterThresholdParams,
+    "filter.calculator": FilterCalculatorParams,
+    "filter.stream_tracer": FilterStreamTracerParams,
+    "filter.glyph": FilterGlyphParams,
+    "python.execute": PythonExecuteParams,
+    "job.status": JobIdParams,
+    "job.cancel": JobIdParams,
+}
 
 
 class CommandHandler:
@@ -28,6 +84,9 @@ class CommandHandler:
         handler = self._handlers.get(command)
         if not handler:
             raise ValueError(f"Unknown command: {command!r}")
+        validator = _VALIDATORS.get(command)
+        if validator is not None:
+            params = validator.model_validate(params).model_dump(exclude_none=True)
         return handler(params)
 
     # ------------------------------------------------------------------
@@ -52,9 +111,7 @@ class CommandHandler:
         self._handlers["display.color_by"] = self._display_color_by
         self._handlers["display.set_representation"] = self._display_set_representation
         self._handlers["display.set_opacity"] = self._display_set_opacity
-        self._handlers["display.rescale_transfer_function"] = (
-            self._display_rescale_transfer_function
-        )
+        self._handlers["display.rescale_transfer_function"] = self._display_rescale_transfer_function
 
         # View / camera
         self._handlers["view.reset_camera"] = self._view_reset_camera
@@ -88,6 +145,7 @@ class CommandHandler:
     def _import_pv():
         """Import paraview.simple — deferred so the module can be imported without ParaView."""
         import paraview.simple as pvs  # noqa: PLC0415
+
         return pvs
 
     def _find_source(self, name: str):
@@ -441,6 +499,7 @@ class CommandHandler:
 
     def _python_execute(self, params: dict) -> dict:
         from bridge.execution import execute_code  # noqa: PLC0415
+
         code = params.get("code")
         script_path = params.get("script_path")
         if not code and not script_path:

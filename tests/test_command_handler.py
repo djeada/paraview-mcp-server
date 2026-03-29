@@ -6,12 +6,9 @@ These tests patch _import_pv so ParaView does not need to be installed.
 
 from __future__ import annotations
 
-import json
 import os
-import sys
 import tempfile
-import types
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -101,6 +98,7 @@ def _make_pv_mock():
 def handler():
     """Provide a CommandHandler with _import_pv patched to return a mock pvs."""
     from bridge.command_handler import CommandHandler
+
     h = CommandHandler()
     pvs = _make_pv_mock()
     h._import_pv = lambda: pvs  # type: ignore[method-assign]
@@ -269,7 +267,7 @@ class TestViewHandlers:
 
     def test_view_set_background(self, handler):
         h, pvs = handler
-        view = pvs.GetActiveViewOrCreate.return_value
+        _ = pvs.GetActiveViewOrCreate.return_value
         result = h.handle("view.set_background", {"color": [0.1, 0.2, 0.3]})
         assert result["color"] == [0.1, 0.2, 0.3]
         assert result["gradient"] is False
@@ -452,9 +450,7 @@ class TestPythonExecuteHandler:
 
     def test_python_execute_script_path(self, handler):
         h, _ = handler
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write("__result__ = 'from file'")
             f.flush()
             try:
@@ -478,12 +474,14 @@ class TestExecutionSafety:
 
     def test_blocked_module_import(self):
         from bridge.execution import execute_code
+
         result = execute_code(code="import subprocess")
         assert result["error"] is not None
         assert "blocked" in result["error"].lower() or "subprocess" in result["error"]
 
     def test_output_capping(self):
         from bridge.execution import _cap_output
+
         short = "hello"
         assert _cap_output(short) == "hello"
         long_text = "x" * 60_000
@@ -493,15 +491,18 @@ class TestExecutionSafety:
 
     def test_script_path_validation_missing_file(self):
         from bridge.execution import _validate_script_path
+
         with pytest.raises(FileNotFoundError):
             _validate_script_path("/nonexistent/path/script.py")
 
     def test_code_and_script_path_mutual_exclusion(self):
         from bridge.execution import execute_code
+
         with pytest.raises(ValueError, match="not both"):
             execute_code(code="pass", script_path="/tmp/x.py")
 
     def test_neither_code_nor_script_path_raises(self):
         from bridge.execution import execute_code
+
         with pytest.raises(ValueError, match="must be provided"):
             execute_code()
