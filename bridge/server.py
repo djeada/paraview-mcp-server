@@ -1,19 +1,19 @@
 """ParaView bridge TCP server — listens for JSON commands and dispatches to handlers."""
 
+import contextlib
 import json
 import logging
-import queue
 import socket
 import threading
 import traceback
 import uuid
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
 PORT = 9876
 BUFFER_SIZE = 65536
+CLIENT_SOCKET_TIMEOUT = 1.0
 
 
 class ParaViewBridgeServer:
@@ -25,11 +25,12 @@ class ParaViewBridgeServer:
         self._server_socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self._client_sockets: set[socket.socket] = set()
+        self._client_sockets_lock = threading.Lock()
         # Import here so the bridge module can be imported without paraview installed.
         from bridge.command_handler import CommandHandler
 
         self._handler = CommandHandler()
-        self._request_queue: queue.Queue[dict[str, Any]] = queue.Queue()
 
     def start(self):
         if self._running:
@@ -47,8 +48,18 @@ class ParaViewBridgeServer:
     def stop(self):
         self._running = False
         if self._server_socket:
+            with contextlib.suppress(OSError):
+                self._server_socket.shutdown(socket.SHUT_RDWR)
             self._server_socket.close()
             self._server_socket = None
+        with self._client_sockets_lock:
+            client_sockets = list(self._client_sockets)
+            self._client_sockets.clear()
+        for client_socket in client_sockets:
+            with contextlib.suppress(OSError):
+                client_socket.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                client_socket.close()
         if self._thread:
             self._thread.join(timeout=3)
             self._thread = None
@@ -58,6 +69,8 @@ class ParaViewBridgeServer:
             try:
                 assert self._server_socket is not None
                 conn, addr = self._server_socket.accept()
+                conn.settimeout(CLIENT_SOCKET_TIMEOUT)
+                self._register_client_socket(conn)
                 logger.info("Client connected from %s", addr)
                 threading.Thread(target=self._handle_client, args=(conn,), daemon=True).start()
             except TimeoutError:
@@ -65,11 +78,24 @@ class ParaViewBridgeServer:
             except OSError:
                 break
 
+    def _register_client_socket(self, conn: socket.socket):
+        with self._client_sockets_lock:
+            self._client_sockets.add(conn)
+
+    def _unregister_client_socket(self, conn: socket.socket):
+        with self._client_sockets_lock:
+            self._client_sockets.discard(conn)
+
     def _handle_client(self, conn: socket.socket):
         buffer = b""
         try:
             while self._running:
-                data = conn.recv(BUFFER_SIZE)
+                try:
+                    data = conn.recv(BUFFER_SIZE)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
                 if not data:
                     break
                 buffer += data
@@ -86,14 +112,26 @@ class ParaViewBridgeServer:
                             "success": False,
                             "error": str(exc),
                         }
-                    conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+                    try:
+                        conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+                    except OSError:
+                        break
         finally:
-            conn.close()
+            self._unregister_client_socket(conn)
+            with contextlib.suppress(OSError):
+                conn.close()
 
     def _process_request(self, request: dict) -> dict:
+        if not isinstance(request, dict):
+            raise TypeError("Request must be a JSON object")
+
         req_id = request.get("id", str(uuid.uuid4()))
-        command = request.get("command", "")
+        command = request.get("command")
         params = request.get("params", {})
+        if not isinstance(command, str) or not command.strip():
+            return {"id": req_id, "success": False, "error": "Missing or invalid command"}
+        if not isinstance(params, dict):
+            return {"id": req_id, "success": False, "error": "Invalid params: expected JSON object"}
         try:
             result = self._handler.handle(command, params)
             return {"id": req_id, "success": True, "result": result}

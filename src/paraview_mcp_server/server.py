@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -32,12 +32,17 @@ class ParaViewConnection:
         self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
         logger.info("Connected to ParaView bridge at %s:%s", self.host, self.port)
 
+    async def _drop_connection(self):
+        writer = self._writer
+        self._reader = None
+        self._writer = None
+        if writer is not None:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+
     async def disconnect(self):
-        if self._writer:
-            self._writer.close()
-            await self._writer.wait_closed()
-            self._writer = None
-            self._reader = None
+        await self._drop_connection()
 
     async def send_command(self, command: str, params: dict | None = None) -> Any:
         """Send a command to the ParaView bridge and return the result."""
@@ -46,9 +51,10 @@ class ParaViewConnection:
 
         assert self._reader is not None
         assert self._writer is not None
+        request_id = str(uuid.uuid4())
 
         request = {
-            "id": str(uuid.uuid4()),
+            "id": request_id,
             "command": command,
             "params": params or {},
         }
@@ -63,12 +69,21 @@ class ParaViewConnection:
                     raise ConnectionError("ParaView bridge connection closed")
 
                 response = json.loads(line)
+                if response.get("id") != request_id:
+                    raise ConnectionError(
+                        f"ParaView bridge sent mismatched response id {response.get('id')!r} "
+                        f"for request {request_id!r}"
+                    )
                 if not response.get("success"):
                     raise RuntimeError(response.get("error", "Unknown error from ParaView bridge"))
                 return response.get("result")
-            except (ConnectionError, OSError) as e:
-                self._writer = None
-                self._reader = None
+            except asyncio.CancelledError:
+                await self._drop_connection()
+                raise
+            except (ConnectionError, OSError, json.JSONDecodeError) as e:
+                await self._drop_connection()
+                if isinstance(e, json.JSONDecodeError):
+                    raise ConnectionError("Lost connection to ParaView bridge: invalid JSON response") from e
                 raise ConnectionError(f"Lost connection to ParaView bridge: {e}") from e
 
 
@@ -296,6 +311,7 @@ async def filter_stream_tracer(
     ctx: Context,
     input: str,
     seed_type: str = "Point Cloud",
+    integration_direction: str = "BOTH",
     num_points: int = 100,
     max_length: float = 1.0,
 ) -> str:
@@ -304,6 +320,7 @@ async def filter_stream_tracer(
         {
             "input": input,
             "seed_type": seed_type,
+            "integration_direction": integration_direction,
             "num_points": num_points,
             "max_length": max_length,
         },
@@ -490,10 +507,11 @@ async def export_screenshot(
     filepath: str,
     width: int = 1920,
     height: int = 1080,
+    transparent: bool = False,
 ) -> str:
     result = await _get_conn(ctx).send_command(
         "export.screenshot",
-        {"filepath": filepath, "width": width, "height": height},
+        {"filepath": filepath, "width": width, "height": height, "transparent": transparent},
     )
     return json.dumps(result, indent=2)
 
@@ -524,11 +542,20 @@ async def export_animation(
     width: int = 1920,
     height: int = 1080,
     frame_rate: int = 15,
+    frame_start: int | None = None,
+    frame_end: int | None = None,
 ) -> str:
-    result = await _get_conn(ctx).send_command(
-        "export.animation",
-        {"filepath": filepath, "width": width, "height": height, "frame_rate": frame_rate},
-    )
+    params: dict[str, Any] = {
+        "filepath": filepath,
+        "width": width,
+        "height": height,
+        "frame_rate": frame_rate,
+    }
+    if frame_start is not None:
+        params["frame_start"] = frame_start
+    if frame_end is not None:
+        params["frame_end"] = frame_end
+    result = await _get_conn(ctx).send_command("export.animation", params)
     return json.dumps(result, indent=2)
 
 

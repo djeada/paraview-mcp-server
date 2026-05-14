@@ -7,7 +7,9 @@ so that invalid or missing fields are caught early with clear error messages.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Self
+
+from pydantic import BaseModel, Field, model_validator
 
 # ── Scene / session ────────────────────────────────────────────────
 
@@ -80,8 +82,16 @@ class ExportAnimationParams(BaseModel):
     width: int = Field(1920, gt=0)
     height: int = Field(1080, gt=0)
     frame_rate: int = Field(15, gt=0)
-    frame_start: int | None = None
-    frame_end: int | None = None
+    frame_start: int | None = Field(None, ge=0)
+    frame_end: int | None = Field(None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_frame_window(self) -> Self:
+        if (self.frame_start is None) != (self.frame_end is None):
+            raise ValueError("frame_start and frame_end must be provided together")
+        if self.frame_start is not None and self.frame_end is not None and self.frame_start > self.frame_end:
+            raise ValueError("frame_start must be less than or equal to frame_end")
+        return self
 
 
 # ── Filters — basic ───────────────────────────────────────────────

@@ -40,6 +40,7 @@ def _make_pv_mock():
     pvs.ColorBy.return_value = None
     pvs.UpdateScalarBars.return_value = None
     pvs.GetDisplayProperties.return_value = MagicMock()
+    pvs.GetColorTransferFunction.return_value = MagicMock()
 
     # Slice filter mock
     slice_mock = MagicMock()
@@ -76,6 +77,7 @@ def _make_pv_mock():
 
     # StreamTracer mock
     stream_mock = MagicMock()
+    stream_mock.IntegrationDirection = "BOTH"
     stream_mock.MaximumStreamlineLength = 1.0
     pvs.StreamTracer.return_value = stream_mock
 
@@ -89,6 +91,9 @@ def _make_pv_mock():
     camera_mock.GetPosition.return_value = (1, 2, 3)
     camera_mock.GetFocalPoint.return_value = (0, 0, 0)
     camera_mock.GetViewUp.return_value = (0, 1, 0)
+    camera_state = {"parallel_scale": 1.0}
+    camera_mock.GetParallelScale.side_effect = lambda: camera_state["parallel_scale"]
+    camera_mock.SetParallelScale.side_effect = lambda value: camera_state.__setitem__("parallel_scale", value)
     pvs.GetActiveViewOrCreate.return_value.GetActiveCamera.return_value = camera_mock
 
     return pvs
@@ -223,7 +228,22 @@ class TestDisplayHandlers:
         h, pvs = handler
         result = h.handle("display.color_by", {"name": "disk.ex2", "array": "Pressure"})
         assert result["array"] == "Pressure"
+        assert result["component"] == -1
         pvs.ColorBy.assert_called_once()
+        lut = pvs.GetColorTransferFunction.return_value
+        assert lut.VectorMode == "Magnitude"
+
+    def test_display_color_by_component(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "display.color_by",
+            {"name": "disk.ex2", "array": "Pressure", "component": 2, "association": "CELLS"},
+        )
+        assert result["association"] == "CELLS"
+        assert result["component"] == 2
+        lut = pvs.GetColorTransferFunction.return_value
+        assert lut.VectorMode == "Component"
+        assert lut.VectorComponent == 2
 
     def test_display_set_representation(self, handler):
         h, pvs = handler
@@ -259,11 +279,12 @@ class TestViewHandlers:
         h, pvs = handler
         result = h.handle(
             "view.set_camera",
-            {"position": [1, 2, 3], "focal_point": [0, 0, 0], "view_up": [0, 1, 0]},
+            {"position": [1, 2, 3], "focal_point": [0, 0, 0], "view_up": [0, 1, 0], "parallel_scale": 3.5},
         )
         assert result["position"] == [1, 2, 3]
         assert result["focal_point"] == [0, 0, 0]
         assert result["view_up"] == [0, 1, 0]
+        assert result["parallel_scale"] == 3.5
 
     def test_view_set_background(self, handler):
         h, pvs = handler
@@ -279,6 +300,7 @@ class TestViewHandlers:
             {"color": [0.1, 0.2, 0.3], "color2": [0.9, 0.8, 0.7]},
         )
         assert result["gradient"] is True
+        assert result["color2"] == [0.9, 0.8, 0.7]
 
 
 class TestExportHandlers:
@@ -291,6 +313,20 @@ class TestExportHandlers:
         assert result["filepath"] == "/tmp/shot.png"
         assert result["resolution"] == [800, 600]
         pvs.SaveScreenshot.assert_called_once()
+
+    def test_export_screenshot_transparent(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "export.screenshot",
+            {"filepath": "/tmp/shot.png", "width": 800, "height": 600, "transparent": True},
+        )
+        assert result["transparent"] is True
+        pvs.SaveScreenshot.assert_called_once_with(
+            "/tmp/shot.png",
+            pvs.GetActiveViewOrCreate.return_value,
+            ImageResolution=[800, 600],
+            TransparentBackground=1,
+        )
 
     def test_export_screenshot_defaults(self, handler):
         h, pvs = handler
@@ -312,6 +348,22 @@ class TestExportHandlers:
         assert result["filepath"] == "/tmp/anim.avi"
         assert result["frame_rate"] == 30
         pvs.SaveAnimation.assert_called_once()
+
+    def test_export_animation_frame_window(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "export.animation",
+            {"filepath": "/tmp/anim.avi", "frame_start": 2, "frame_end": 5},
+        )
+        assert result["frame_start"] == 2
+        assert result["frame_end"] == 5
+        pvs.SaveAnimation.assert_called_once_with(
+            "/tmp/anim.avi",
+            pvs.GetActiveViewOrCreate.return_value,
+            ImageResolution=[1920, 1080],
+            FrameRate=15,
+            FrameWindow=[2, 5],
+        )
 
 
 class TestBasicFilterHandlers:
@@ -395,6 +447,15 @@ class TestAdvancedFilterHandlers:
         assert result["num_points"] == 200
         assert result["max_length"] == 2.0
         pvs.StreamTracer.assert_called_once()
+
+    def test_filter_stream_tracer_integration_direction(self, handler):
+        h, pvs = handler
+        result = h.handle(
+            "filter.stream_tracer",
+            {"input": "disk.ex2", "integration_direction": "FORWARD"},
+        )
+        assert result["integration_direction"] == "FORWARD"
+        assert pvs.StreamTracer.return_value.IntegrationDirection == "FORWARD"
 
     def test_filter_glyph(self, handler):
         h, pvs = handler
@@ -506,3 +567,8 @@ class TestExecutionSafety:
 
         with pytest.raises(ValueError, match="must be provided"):
             execute_code()
+
+    def test_export_animation_requires_complete_frame_window(self, handler):
+        h, _ = handler
+        with pytest.raises(ValueError, match="provided together"):
+            h.handle("export.animation", {"filepath": "/tmp/anim.avi", "frame_start": 1})

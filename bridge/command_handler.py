@@ -262,10 +262,22 @@ class CommandHandler:
         view = pvs.GetActiveViewOrCreate("RenderView")
         display = pvs.GetDisplayProperties(src, view)
         array = params["array"]
+        component = int(params.get("component", -1))
         association = params.get("association", "POINTS")
         pvs.ColorBy(display, (association, array))
+        lut = pvs.GetColorTransferFunction(array)
+        if component < 0:
+            lut.VectorMode = "Magnitude"
+        else:
+            lut.VectorMode = "Component"
+            lut.VectorComponent = component
         pvs.UpdateScalarBars(view)
-        return {"name": params["name"], "array": array, "association": association}
+        return {
+            "name": params["name"],
+            "array": array,
+            "association": association,
+            "component": component,
+        }
 
     def _display_set_representation(self, params: dict) -> dict:
         pvs = self._import_pv()
@@ -319,19 +331,27 @@ class CommandHandler:
         pos = list(camera.GetPosition())
         fp = list(camera.GetFocalPoint())
         up = list(camera.GetViewUp())
-        return {"position": pos, "focal_point": fp, "view_up": up}
+        parallel_scale = float(camera.GetParallelScale())
+        return {
+            "position": pos,
+            "focal_point": fp,
+            "view_up": up,
+            "parallel_scale": parallel_scale,
+        }
 
     def _view_set_background(self, params: dict) -> dict:
         pvs = self._import_pv()
         view = pvs.GetActiveViewOrCreate("RenderView")
         color = params["color"]
         view.Background = color
+        result = {"color": color, "gradient": "color2" in params}
         if "color2" in params:
             view.Background2 = params["color2"]
             view.UseGradientBackground = True
+            result["color2"] = params["color2"]
         else:
             view.UseGradientBackground = False
-        return {"color": color, "gradient": "color2" in params}
+        return result
 
     # ------------------------------------------------------------------
     # Export handlers
@@ -342,9 +362,14 @@ class CommandHandler:
         filepath = params["filepath"]
         width = int(params.get("width", 1920))
         height = int(params.get("height", 1080))
+        transparent = bool(params.get("transparent", False))
         view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.SaveScreenshot(filepath, view, ImageResolution=[width, height])
-        return {"filepath": filepath, "resolution": [width, height]}
+        pvs.SaveScreenshot(filepath, view, ImageResolution=[width, height], TransparentBackground=int(transparent))
+        return {
+            "filepath": filepath,
+            "resolution": [width, height],
+            "transparent": transparent,
+        }
 
     def _export_data(self, params: dict) -> dict:
         pvs = self._import_pv()
@@ -359,18 +384,25 @@ class CommandHandler:
         width = int(params.get("width", 1920))
         height = int(params.get("height", 1080))
         frame_rate = int(params.get("frame_rate", 15))
+        frame_start = params.get("frame_start")
+        frame_end = params.get("frame_end")
         view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.SaveAnimation(
-            filepath,
-            view,
-            ImageResolution=[width, height],
-            FrameRate=frame_rate,
-        )
-        return {
+        save_kwargs: dict[str, Any] = {
+            "ImageResolution": [width, height],
+            "FrameRate": frame_rate,
+        }
+        if frame_start is not None and frame_end is not None:
+            save_kwargs["FrameWindow"] = [int(frame_start), int(frame_end)]
+        pvs.SaveAnimation(filepath, view, **save_kwargs)
+        result = {
             "filepath": filepath,
             "resolution": [width, height],
             "frame_rate": frame_rate,
         }
+        if frame_start is not None and frame_end is not None:
+            result["frame_start"] = int(frame_start)
+            result["frame_end"] = int(frame_end)
+        return result
 
     # ------------------------------------------------------------------
     # Filter handlers — basic
@@ -458,9 +490,11 @@ class CommandHandler:
         pvs = self._import_pv()
         src = self._find_source(params["input"])
         seed_type = params.get("seed_type", "Point Cloud")
+        integration_direction = params.get("integration_direction", "BOTH")
         num_points = int(params.get("num_points", 100))
         max_length = float(params.get("max_length", 1.0))
         filt = pvs.StreamTracer(Input=src, SeedType=seed_type)
+        filt.IntegrationDirection = integration_direction
         filt.MaximumStreamlineLength = max_length
         if hasattr(filt, "SeedType") and hasattr(filt.SeedType, "NumberOfPoints"):
             filt.SeedType.NumberOfPoints = num_points
@@ -470,6 +504,7 @@ class CommandHandler:
             "input": params["input"],
             "filter": "StreamTracer",
             "seed_type": seed_type,
+            "integration_direction": integration_direction,
             "num_points": num_points,
             "max_length": max_length,
         }
