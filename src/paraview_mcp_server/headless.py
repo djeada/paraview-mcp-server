@@ -14,6 +14,7 @@ import os
 import tempfile
 import textwrap
 import time
+import traceback
 import uuid
 from pathlib import Path
 from typing import Any
@@ -184,7 +185,21 @@ class HeadlessPvpythonExecutor:
         elapsed = time.monotonic() - start
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")
-        payload, clean_stdout = _extract_payload(stdout)
+        try:
+            payload, clean_stdout = _extract_payload(stdout)
+        except json.JSONDecodeError as exc:
+            error = f"Headless pvpython returned an invalid result payload: {exc}"
+            if stderr.strip():
+                error = f"{error}\n{stderr.strip()}"
+            return {
+                "result": None,
+                "stdout": _cap_output(stdout),
+                "stderr": _cap_output(stderr),
+                "error": error,
+                "duration_seconds": round(elapsed, 4),
+                "timed_out": False,
+                "cancelled": False,
+            }
 
         if payload is None:
             error = f"Headless pvpython exited with code {proc.returncode} without a result payload"
@@ -248,26 +263,40 @@ class HeadlessJobManager:
         async def runner():
             job["status"] = "running"
             job["started_at"] = time.time()
-            result = await executor.execute(
-                code=code,
-                script_path=script_path,
-                args=args,
-                timeout_seconds=timeout_seconds,
-                process_holder=process_holder,
-            )
-            job["result"] = result.get("result")
-            job["stdout"] = result.get("stdout", "")
-            job["stderr"] = result.get("stderr", "")
-            job["error"] = result.get("error")
-            job["cancelled"] = bool(result.get("cancelled"))
-            job["timed_out"] = bool(result.get("timed_out"))
-            job["completed_at"] = time.time()
-            if job["cancelled"]:
+            try:
+                result = await executor.execute(
+                    code=code,
+                    script_path=script_path,
+                    args=args,
+                    timeout_seconds=timeout_seconds,
+                    process_holder=process_holder,
+                )
+            except asyncio.CancelledError:
+                job["error"] = "Execution cancelled"
+                job["cancelled"] = True
                 job["status"] = "cancelled"
-            elif job["error"]:
+                job["completed_at"] = time.time()
+                raise
+            except Exception as exc:
+                job["error"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
                 job["status"] = "failed"
+                job["completed_at"] = time.time()
             else:
-                job["status"] = "succeeded"
+                job["result"] = result.get("result")
+                job["stdout"] = result.get("stdout", "")
+                job["stderr"] = result.get("stderr", "")
+                job["error"] = result.get("error")
+                job["cancelled"] = bool(result.get("cancelled"))
+                job["timed_out"] = bool(result.get("timed_out"))
+                job["completed_at"] = time.time()
+                if job["cancelled"]:
+                    job["status"] = "cancelled"
+                elif job["error"]:
+                    job["status"] = "failed"
+                else:
+                    job["status"] = "succeeded"
+            finally:
+                process_holder.pop("process", None)
 
         job["task"] = asyncio.create_task(runner())
         return job_id

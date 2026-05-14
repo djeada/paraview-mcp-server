@@ -10,7 +10,9 @@ from paraview_mcp_server.headless import HeadlessPvpythonExecutor
 from paraview_mcp_server.server import (
     HEADLESS_JOB_MANAGER,
     ParaViewConnection,
+    export_animation,
     export_screenshot,
+    filter_stream_tracer,
     job_cancel,
     job_list,
     job_status,
@@ -111,6 +113,34 @@ class TestToolRegistration:
             properties = schema.get("properties", {})
             assert "ctx" not in properties, f"Tool {tool.name} exposes ctx in schema"
 
+    def test_selected_tool_schemas_match_supported_parameters(self):
+        expected_properties = {
+            "paraview_display_color_by": {"name", "array", "component", "association"},
+            "paraview_filter_stream_tracer": {
+                "input",
+                "seed_type",
+                "integration_direction",
+                "num_points",
+                "max_length",
+            },
+            "paraview_export_screenshot": {"filepath", "width", "height", "transparent"},
+            "paraview_export_animation": {
+                "filepath",
+                "width",
+                "height",
+                "frame_rate",
+                "frame_start",
+                "frame_end",
+            },
+        }
+
+        for tool in mcp._tool_manager._tools.values():
+            if tool.name not in expected_properties:
+                continue
+            schema = getattr(tool, "inputSchema", None) or getattr(tool, "parameters", {})
+            properties = set(schema.get("properties", {}))
+            assert properties == expected_properties[tool.name]
+
 
 class TestParaViewConnection:
     """Test the async TCP client that communicates with the ParaView bridge."""
@@ -125,12 +155,15 @@ class TestParaViewConnection:
         mock_writer = AsyncMock()
         mock_writer.write = MagicMock()
         mock_writer.drain = AsyncMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
 
         conn._reader = mock_reader
         conn._writer = mock_writer
 
-        result = await conn.send_command("scene.get_info")
-        assert result == {"source_count": 3}
+        with patch("paraview_mcp_server.server.uuid.uuid4", return_value="test-id"):
+            result = await conn.send_command("scene.get_info")
+            assert result == {"source_count": 3}
 
     @pytest.mark.asyncio
     async def test_send_command_error_response(self):
@@ -142,11 +175,16 @@ class TestParaViewConnection:
         mock_writer = AsyncMock()
         mock_writer.write = MagicMock()
         mock_writer.drain = AsyncMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
 
         conn._reader = mock_reader
         conn._writer = mock_writer
 
-        with pytest.raises(RuntimeError, match="Source not found"):
+        with (
+            patch("paraview_mcp_server.server.uuid.uuid4", return_value="test-id"),
+            pytest.raises(RuntimeError, match="Source not found"),
+        ):
             await conn.send_command("source.open_file", {"filepath": "/bad/path.vtu"})
 
     @pytest.mark.asyncio
@@ -158,12 +196,39 @@ class TestParaViewConnection:
         mock_writer = AsyncMock()
         mock_writer.write = MagicMock()
         mock_writer.drain = AsyncMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
 
         conn._reader = mock_reader
         conn._writer = mock_writer
 
         with pytest.raises(ConnectionError):
             await conn.send_command("scene.get_info")
+
+    @pytest.mark.asyncio
+    async def test_send_command_response_id_mismatch_resets_connection(self):
+        conn = ParaViewConnection()
+
+        mock_reader = AsyncMock()
+        mock_reader.readline = AsyncMock(
+            return_value=json.dumps({"id": "wrong-id", "success": True, "result": {}}).encode() + b"\n"
+        )
+        mock_writer = AsyncMock()
+        mock_writer.write = MagicMock()
+        mock_writer.drain = AsyncMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+
+        conn._reader = mock_reader
+        conn._writer = mock_writer
+
+        with pytest.raises(ConnectionError, match="mismatched response id"):
+            await conn.send_command("scene.get_info")
+
+        assert conn._reader is None
+        assert conn._writer is None
+        mock_writer.close.assert_called_once()
+        mock_writer.wait_closed.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_connect_failure(self):
@@ -181,8 +246,13 @@ class TestParaViewConnection:
         mock_writer = AsyncMock()
         mock_writer.write = MagicMock()
         mock_writer.drain = AsyncMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
 
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
+        with (
+            patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)),
+            patch("paraview_mcp_server.server.uuid.uuid4", return_value="test-id"),
+        ):
             result = await conn.send_command("scene.get_info")
             assert result == {}
 
@@ -234,11 +304,46 @@ class TestMCPToolFunctions:
     @pytest.mark.asyncio
     async def test_export_screenshot(self):
         ctx, conn = self._make_ctx({"filepath": "/tmp/shot.png", "resolution": [1920, 1080]})
-        result = json.loads(await export_screenshot(ctx, filepath="/tmp/shot.png", width=1920, height=1080))
+        result = json.loads(
+            await export_screenshot(ctx, filepath="/tmp/shot.png", width=1920, height=1080, transparent=True)
+        )
         assert result["resolution"] == [1920, 1080]
         conn.send_command.assert_awaited_once_with(
             "export.screenshot",
-            {"filepath": "/tmp/shot.png", "width": 1920, "height": 1080},
+            {"filepath": "/tmp/shot.png", "width": 1920, "height": 1080, "transparent": True},
+        )
+
+    @pytest.mark.asyncio
+    async def test_export_animation_forwards_frame_window(self):
+        ctx, conn = self._make_ctx({"filepath": "/tmp/anim.avi", "frame_start": 1, "frame_end": 5})
+        result = json.loads(await export_animation(ctx, filepath="/tmp/anim.avi", frame_start=1, frame_end=5))
+        assert result["frame_start"] == 1
+        assert result["frame_end"] == 5
+        conn.send_command.assert_awaited_once_with(
+            "export.animation",
+            {"filepath": "/tmp/anim.avi", "width": 1920, "height": 1080, "frame_rate": 15, "frame_start": 1, "frame_end": 5},
+        )
+
+    @pytest.mark.asyncio
+    async def test_filter_stream_tracer_forwards_integration_direction(self):
+        ctx, conn = self._make_ctx({"filter": "StreamTracer", "integration_direction": "BACKWARD"})
+        result = json.loads(
+            await filter_stream_tracer(
+                ctx,
+                input="disk.ex2",
+                integration_direction="BACKWARD",
+            )
+        )
+        assert result["integration_direction"] == "BACKWARD"
+        conn.send_command.assert_awaited_once_with(
+            "filter.stream_tracer",
+            {
+                "input": "disk.ex2",
+                "seed_type": "Point Cloud",
+                "integration_direction": "BACKWARD",
+                "num_points": 100,
+                "max_length": 1.0,
+            },
         )
 
     @pytest.mark.asyncio
@@ -282,6 +387,20 @@ class TestHeadlessExecutor:
         assert "noise before" in result["stdout"]
         assert "inner stdout" in result["stdout"]
         assert result["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_execute_invalid_payload_returns_error(self):
+        executor = HeadlessPvpythonExecutor(pvpython_binary="pvpython")
+
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(return_value=(b"__PARAVIEW_MCP_RESULT__={not-json}\n", b""))
+        proc.returncode = 0
+
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await executor.execute(code="__result__ = {'ok': True}")
+
+        assert result["result"] is None
+        assert "invalid result payload" in result["error"]
 
 
 class TestHeadlessTransportTools:
@@ -373,6 +492,27 @@ class TestHeadlessTransportTools:
             cancelled = json.loads(await job_cancel(ctx, job_id))
 
         assert cancelled["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_headless_async_job_records_executor_exception(self):
+        HEADLESS_JOB_MANAGER._jobs.clear()
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = MagicMock()
+
+        async def broken_execute(self, **_kwargs):
+            raise RuntimeError("executor exploded")
+
+        with patch(
+            "paraview_mcp_server.server.HeadlessPvpythonExecutor.execute",
+            new=broken_execute,
+        ):
+            created = json.loads(await python_exec_async(ctx, code="pass"))
+            job_id = created["job_id"]
+            await asyncio.sleep(0)
+            status = json.loads(await job_status(ctx, job_id))
+
+        assert status["status"] == "failed"
+        assert "executor exploded" in status["error"]
 
 
 class TestMCPEntrypoint:
