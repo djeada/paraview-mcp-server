@@ -321,7 +321,14 @@ class TestMCPToolFunctions:
         assert result["frame_end"] == 5
         conn.send_command.assert_awaited_once_with(
             "export.animation",
-            {"filepath": "/tmp/anim.avi", "width": 1920, "height": 1080, "frame_rate": 15, "frame_start": 1, "frame_end": 5},
+            {
+                "filepath": "/tmp/anim.avi",
+                "width": 1920,
+                "height": 1080,
+                "frame_rate": 15,
+                "frame_start": 1,
+                "frame_end": 5,
+            },
         )
 
     @pytest.mark.asyncio

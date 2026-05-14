@@ -71,8 +71,7 @@ class ParaViewConnection:
                 response = json.loads(line)
                 if response.get("id") != request_id:
                     raise ConnectionError(
-                        f"ParaView bridge sent mismatched response id {response.get('id')!r} "
-                        f"for request {request_id!r}"
+                        f"ParaView bridge sent mismatched response id {response.get('id')!r} for request {request_id!r}"
                     )
                 if not response.get("success"):
                     raise RuntimeError(response.get("error", "Unknown error from ParaView bridge"))
