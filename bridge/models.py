@@ -1,7 +1,7 @@
 """Dependency-free bridge command parameter validation.
 
-The bridge runs inside ParaView's ``pvpython``, which commonly does not have
-the MCP server's Python dependencies installed.  These classes intentionally
+The bridge runs inside ParaView's Python runtime, which commonly does not have
+the MCP server's Python dependencies installed. These classes intentionally
 provide the small ``model_validate(...).model_dump(...)`` surface used by the
 command handler without importing third-party packages.
 """

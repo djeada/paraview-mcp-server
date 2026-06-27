@@ -33,6 +33,18 @@ class ParaViewBridgeServer:
         self._handler = CommandHandler()
         self._handler_lock = threading.Lock()
 
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
     def start(self):
         if self._running:
             return
@@ -40,6 +52,7 @@ class ParaViewBridgeServer:
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_socket.settimeout(1.0)
         self._server_socket.bind((self._host, self._port))
+        self._host, self._port = self._server_socket.getsockname()[:2]
         self._server_socket.listen(5)
         self._running = True
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
