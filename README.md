@@ -38,6 +38,12 @@ and tool namespace table.
 ### 1. Install the MCP server
 
 ```bash
+pip install paraview-mcp-python
+```
+
+For local development from this repository:
+
+```bash
 git clone https://github.com/djeada/paraview-mcp-server.git
 cd paraview-mcp-server
 python -m venv .venv
