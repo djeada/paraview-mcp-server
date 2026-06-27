@@ -8,6 +8,7 @@ is available.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from bridge.models import (
@@ -346,7 +347,8 @@ class CommandHandler:
             camera.SetViewUp(*params["view_up"])
         if "parallel_scale" in params:
             camera.SetParallelScale(params["parallel_scale"])
-        view.StillRender()
+        if os.environ.get("PARAVIEW_MCP_GUI_BRIDGE") != "1":
+            view.StillRender()
         pos = list(camera.GetPosition())
         fp = list(camera.GetFocalPoint())
         up = list(camera.GetViewUp())

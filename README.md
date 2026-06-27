@@ -130,6 +130,11 @@ Expected output:
 ParaView MCP GUI bridge started on 127.0.0.1:9876
 ```
 
+Do not start the live GUI bridge with `paraview --script
+scripts/start_paraview_gui_bridge.py`. ParaView runs startup scripts before the
+embedded GUI Python environment is fully ready for pipeline edits. Use **Tools
+-> Python Shell -> Run Script** for the live GUI bridge.
+
 If `paraview-mcp-python` is installed into ParaView's Python environment, you
 can also start the live GUI bridge directly from the Python Shell:
 
