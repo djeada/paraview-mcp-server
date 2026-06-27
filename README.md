@@ -226,10 +226,10 @@ Async jobs run in a separate headless `pvpython` process via `HeadlessPvpythonEx
 
 ---
 
-## Safety model
+## Python execution trust model
 
-- **Blocked modules** — scripts cannot import `subprocess`, `shutil`, `socket`, `ctypes`,
-  `multiprocessing`, `webbrowser`, or several network-facing stdlib modules.
+- **Trusted local execution** — `paraview_python_exec` can run arbitrary Python available to `pvpython`,
+  including imports and full `paraview.simple` workflows.
 - **Output bounding** — stdout/stderr capped at **50 KB**.
 - **Cooperative timeout** — default 30 seconds per script execution.
 - **Script path validation** — optionally restrict execution to approved root directories.
@@ -279,7 +279,7 @@ paraview-mcp-server/
 │   ├── __init__.py
 │   ├── server.py                # TCP socket bridge server
 │   ├── command_handler.py       # Command registry + paraview.simple handlers (27 commands)
-│   └── execution.py             # python.execute helper with safety controls
+│   └── execution.py             # trusted local python.execute helper
 ├── scripts/
 │   ├── start_paraview_bridge.py
 │   ├── paraview_bridge_request.py
@@ -296,7 +296,7 @@ paraview-mcp-server/
 └── tests/
     ├── test_server.py           # 31 tools, connection, headless, async jobs
     ├── test_protocol.py         # Wire encoding, fake bridge integration
-    └── test_command_handler.py  # All 27 handlers + safety controls
+    └── test_command_handler.py  # All 27 handlers + execution controls
 ```
 
 ---

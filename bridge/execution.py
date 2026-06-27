@@ -1,9 +1,7 @@
 """Python script execution helper for the ParaView bridge.
 
-Safety controls
----------------
-- **Blocked-module import hook** prevents scripts from importing dangerous
-  standard-library modules (``subprocess``, ``shutil``, ``socket``, …).
+Execution controls
+------------------
 - **Output bounding** caps stdout/stderr at 50 KB.
 - **Timeout** (cooperative) — the caller can supply ``timeout_seconds``.
 - **Script-path execution** reads the script from disk, validating that it
@@ -12,12 +10,9 @@ Safety controls
 
 from __future__ import annotations
 
-import importlib.abc
-import importlib.machinery
 import io
 import json
 import os
-import sys
 import threading
 import time
 import traceback
@@ -27,20 +22,6 @@ from typing import Any
 
 MAX_OUTPUT_SIZE = 50_000
 
-BLOCKED_MODULES: set[str] = {
-    "subprocess",
-    "shutil",
-    "socket",
-    "ctypes",
-    "multiprocessing",
-    "webbrowser",
-    "http.server",
-    "xmlrpc.server",
-    "ftplib",
-    "smtplib",
-    "telnetlib",
-}
-
 # Optionally set via bridge config; empty list → no restriction.
 APPROVED_SCRIPT_ROOTS: list[str] = []
 
@@ -48,60 +29,6 @@ APPROVED_SCRIPT_ROOTS: list[str] = []
 ALLOW_INLINE_CODE: bool = True
 
 DEFAULT_TIMEOUT_SECONDS: float = 30.0
-
-
-# ---------------------------------------------------------------------------
-# Import hook that blocks dangerous modules during script execution
-# ---------------------------------------------------------------------------
-
-
-class _BlockedImportFinder(importlib.abc.MetaPathFinder):
-    """Raises ``ImportError`` for modules in the *blocked* set."""
-
-    _active = False
-    _blocked: set[str] = set()
-
-    def find_module(self, fullname: str, path=None):
-        """Return *self* if the module should be blocked, ``None`` otherwise (legacy hook)."""
-        if self._active and fullname in self._blocked:
-            return self
-        return None
-
-    def find_spec(self, fullname: str, path=None, target=None):
-        """Raise ``ImportError`` for blocked modules (modern import hook)."""
-        if self._active and fullname in self._blocked:
-            raise ImportError(f"Module {fullname!r} is blocked during ParaView MCP script execution")
-        return None
-
-    def load_module(self, fullname: str):
-        raise ImportError(f"Module {fullname!r} is blocked during ParaView MCP script execution")
-
-
-_BLOCKER = _BlockedImportFinder()
-
-
-def _install_import_blocker() -> dict[str, Any]:
-    """Activate the blocker and hide already-imported blocked modules.
-
-    Returns a dict of hidden modules that must be restored later.
-    """
-    _BLOCKER._blocked = BLOCKED_MODULES
-    _BLOCKER._active = True
-    if _BLOCKER not in sys.meta_path:
-        sys.meta_path.insert(0, _BLOCKER)
-    # Temporarily remove blocked modules from sys.modules so `import X`
-    # falls through to the meta-path hooks instead of hitting the cache.
-    hidden: dict[str, Any] = {}
-    for mod_name in BLOCKED_MODULES:
-        if mod_name in sys.modules:
-            hidden[mod_name] = sys.modules.pop(mod_name)
-    return hidden
-
-
-def _remove_import_blocker(hidden: dict[str, Any]) -> None:
-    _BLOCKER._active = False
-    # Restore previously-imported modules.
-    sys.modules.update(hidden)
 
 
 # ---------------------------------------------------------------------------
@@ -199,14 +126,11 @@ def execute_code(
     assert isinstance(code, str)
 
     def _run() -> None:
-        hidden = _install_import_blocker()
         try:
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
                 exec(compile(code, "<paraview-mcp-script>", "exec"), namespace)  # noqa: S102
         except Exception as exc:
             result_holder["error"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        finally:
-            _remove_import_blocker(hidden)
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

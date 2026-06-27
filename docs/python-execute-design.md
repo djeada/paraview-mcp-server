@@ -63,13 +63,13 @@ Headless transport adds:
 
 ---
 
-## Safety model
+## Python Execution Trust Model
 
-### Blocked modules
+### Trusted local execution
 
-The following modules are blocked during script execution:
-subprocess, shutil, socket, ctypes, multiprocessing, webbrowser,
-http.server, xmlrpc.server, ftplib, smtplib, telnetlib.
+Bridge scripts run inside the local `pvpython` process and may import normal
+Python modules. This is intentional: `paraview_python_exec` is the escape hatch
+for full ParaView automation when the fixed MCP tool set is too small.
 
 ### Output bounding
 
@@ -134,5 +134,5 @@ Use paraview_python_exec_async for long-running scripts:
 
 - Cancellation token (bridge transport) for cooperative cancellation
 - Script library registry for referencing scripts by name
-- Sandboxed execution beyond the blocked-module list
+- Optional sandboxed execution mode for deployments that need stricter isolation
 - Resource limits for memory usage per script

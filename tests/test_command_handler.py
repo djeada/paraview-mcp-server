@@ -532,15 +532,16 @@ class TestPythonExecuteHandler:
         assert "timeout" in result["error"].lower()
 
 
-class TestExecutionSafety:
-    """Test the safety controls in bridge/execution.py."""
+class TestExecutionControls:
+    """Test the execution controls in bridge/execution.py."""
 
-    def test_blocked_module_import(self):
+    def test_standard_library_imports_are_allowed(self):
         from bridge.execution import execute_code
 
-        result = execute_code(code="import subprocess")
-        assert result["error"] is not None
-        assert "blocked" in result["error"].lower() or "subprocess" in result["error"]
+        result = execute_code(code="import subprocess\n__result__ = subprocess.__name__")
+
+        assert result["error"] is None
+        assert result["result"] == "subprocess"
 
     def test_output_capping(self):
         from bridge.execution import _cap_output

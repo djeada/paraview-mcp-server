@@ -68,7 +68,7 @@ Alternative headless transport (no bridge required):
 |---|---|
 | `server.py` | Threaded TCP socket server, newline-delimited JSON framing |
 | `command_handler.py` | Command registry mapping 27 command names to `paraview.simple` calls |
-| `execution.py` | `execute_code()` — exec-based Python execution with safety controls (blocked modules, timeout, output cap, script path validation) |
+| `execution.py` | `execute_code()` — trusted local Python execution with timeout, output cap, and optional script path validation |
 | `__init__.py` | Package marker |
 
 ---
@@ -283,7 +283,7 @@ paraview-mcp-server/
 │   ├── __init__.py
 │   ├── server.py                # TCP bridge server
 │   ├── command_handler.py       # 27-command registry
-│   └── execution.py             # python.execute with safety controls
+│   └── execution.py             # trusted local python.execute helper
 ├── scripts/
 │   ├── start_paraview_bridge.py
 │   ├── paraview_bridge_request.py
