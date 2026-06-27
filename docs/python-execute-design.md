@@ -8,9 +8,10 @@ escape hatch for workflows that require more than the fixed tool set.
 Two transports are supported:
 
 1. **Bridge** (default) - code runs inside the active bridge process via exec().
-   For live GUI control, that process is the open ParaView GUI where
-   `scripts/start_paraview_gui_bridge.py` was run. For headless control, it is
-   the `pvpython scripts/start_paraview_bridge.py` process.
+   For GUI control started by `paraview-mcp-launch`, that process is a
+   `pvpython` client connected to the same `pvserver` as the ParaView GUI. For
+   headless control, it is the standalone `pvpython scripts/start_paraview_bridge.py`
+   process.
 2. **Headless** - code runs in a separate pvpython subprocess via HeadlessPvpythonExecutor.
 
 ---
@@ -71,7 +72,8 @@ Headless transport adds:
 ### Trusted local execution
 
 Bridge scripts run inside the local ParaView Python process and may import
-normal Python modules. In live GUI mode, that is the open ParaView GUI process.
+normal Python modules. In GUI mode, that is a `pvpython` bridge client attached
+to the same `pvserver` as the ParaView GUI.
 This is intentional: `paraview_python_exec` is the escape hatch for full
 ParaView automation when the fixed MCP tool set is too small.
 

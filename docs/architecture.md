@@ -19,16 +19,16 @@
            │ JSON / TCP localhost:9876
            │ (newline-delimited JSON)
 ┌──────────▼─────────────┐
-│  ParaView GUI bridge   │  Runs inside the open ParaView GUI
-│  bridge/               │  via scripts/start_paraview_gui_bridge.py
+│  ParaView bridge       │  Runs in pvpython
+│  bridge/               │  connected to pvserver
 │  · ParaViewBridgeServer│
 │  · CommandHandler      │  27 registered commands
 │  · execute_code()      │
 └──────────┬─────────────┘
-           │
+           │ ParaView client/server
 ┌──────────▼─────────────┐
-│  paraview.simple       │  Live ParaView GUI session
-│  servermanager         │
+│  pvserver              │  Shared ParaView state
+│  ParaView GUI client   │
 └────────────────────────┘
 ```
 
@@ -220,31 +220,32 @@ MCP client
 
 ## Lifecycle
 
-1. User starts the live GUI bridge from ParaView: **Tools → Python Shell → Run Script**,
-   selecting `scripts/start_paraview_gui_bridge.py`.
-2. Bridge server binds to `127.0.0.1:9876` and listens for TCP connections.
-3. User starts an MCP client (Claude Desktop, Codex CLI, etc.)
-4. MCP client spawns `paraview-mcp-server` over stdio.
-5. MCP server connects to bridge on startup (or lazy-connects on first tool call).
-6. User issues a natural language request → client calls an MCP tool → server
+1. User starts the ParaView side with `paraview-mcp-launch`.
+2. The launcher starts `pvserver --multi-clients`.
+3. The launcher connects the ParaView GUI as the first client.
+4. The launcher starts `pvpython scripts/start_paraview_bridge.py --server-host ...`,
+   which connects to the same `pvserver` and binds the MCP TCP bridge on
+   `127.0.0.1:9876`.
+5. User starts an MCP client (Claude Desktop, Codex CLI, etc.)
+6. MCP client spawns `paraview-mcp-server` over stdio.
+7. MCP server connects to bridge on startup (or lazy-connects on first tool call).
+8. User issues a natural language request → client calls an MCP tool → server
    forwards as JSON → bridge dispatches → returns result.
-7. User stops the GUI bridge with `stop_gui_bridge()` in ParaView's Python Shell.
-   Server reconnects on next call if the bridge restarts.
+9. User exits ParaView or presses Ctrl+C in the launcher terminal to stop the
+   GUI, bridge, and local `pvserver`.
 
 ---
 
 ## Configuration
 
-### Live GUI Bridge
+### Server-backed GUI launcher
 
-Run this from ParaView's Python Shell with **Run Script**:
-
-```text
-scripts/start_paraview_gui_bridge.py
+```bash
+paraview-mcp-launch
 ```
 
-The script starts a background TCP server in the open ParaView GUI process and
-returns immediately.
+This starts a local `pvserver`, connects the ParaView GUI, then connects a
+`pvpython` bridge client to the same server-backed ParaView session.
 
 ### Headless Bridge
 

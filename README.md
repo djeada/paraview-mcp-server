@@ -17,18 +17,21 @@ paraview-mcp-server
 
 ## What Parts Are There?
 
-There are three moving pieces:
+There are four moving pieces in the GUI workflow:
 
 | Part | Runs where | Purpose |
 |---|---|---|
 | **MCP client** | Codex CLI, Claude Desktop, or another MCP host | Starts the MCP server and calls tools. |
 | **MCP server** | Normal Python environment | Speaks MCP over stdio and forwards tool calls to ParaView over TCP. |
-| **ParaView GUI bridge** | Already-open ParaView GUI process | Receives TCP JSON commands and executes `paraview.simple` operations in that live GUI session. |
+| **ParaView bridge** | `pvpython` process | Receives TCP JSON commands and executes `paraview.simple` operations. |
+| **ParaView runtime** | `pvserver` plus a ParaView GUI client | Owns the shared ParaView session that the GUI and bridge both use. |
 
-The ParaView bridge is the ParaView-side component. It plays the same role as
-the Blender add-on in `blender-mcp-server`: it must run inside the application
-you want to control. For live GUI control, start the bridge from ParaView's
-Python Shell using `scripts/start_paraview_gui_bridge.py`.
+ParaView is not Blender: Python plugins and VTK timer callbacks are pipeline
+extension mechanisms, not a safe general-purpose remote-control hook for a live
+GUI process. The supported GUI workflow here uses ParaView's client/server
+model. `paraview-mcp-launch` starts a local `pvserver`, connects the ParaView
+GUI as the first client, then connects a `pvpython` bridge client to the same
+session.
 
 ```
 ┌──────────────────────────────┐      stdio      ┌────────────────────────┐
@@ -39,24 +42,24 @@ Python Shell using `scripts/start_paraview_gui_bridge.py`.
                                                               │ 127.0.0.1:9876
                                                    ┌──────────▼─────────────┐
                                                    │ ParaView Bridge        │
-                                                   │ live GUI process       │
+                                                   │ pvpython client        │
                                                    └──────────┬─────────────┘
-                                                              │
+                                                              │ ParaView client/server
                                                    ┌──────────▼─────────────┐
-                                                   │ paraview.simple        │
-                                                   │ ParaView runtime       │
+                                                   │ pvserver + GUI client  │
+                                                   │ shared ParaView state  │
                                                    └────────────────────────┘
 ```
 
 Why a ParaView-side bridge? ParaView's useful automation API is
 `paraview.simple`, and it must execute inside a ParaView Python runtime. The
-MCP server itself is only a protocol adapter; it cannot modify a ParaView GUI
-unless the bridge is running inside that GUI process.
+MCP server itself is only a protocol adapter; it cannot modify a ParaView
+session unless a ParaView-side bridge is running.
 
 For live GUI modification, use:
 
 ```text
-Codex/Claude -> MCP server -> bridge inside open ParaView GUI -> live GUI session
+Codex/Claude -> MCP server -> pvpython bridge -> pvserver <- ParaView GUI
 ```
 
 For headless automation, use:
@@ -85,6 +88,7 @@ This installs:
 
 ```bash
 paraview-mcp-server
+paraview-mcp-launch
 ```
 
 ### Option B: Clone this repository for the ParaView bridge
@@ -104,54 +108,37 @@ This creates:
 
 ```bash
 .venv/bin/paraview-mcp-server
+.venv/bin/paraview-mcp-launch
 ```
 
 ---
 
 ## Start Everything
 
-Start the pieces in this order.
+Start the ParaView side with one command:
 
-### 1. Start the ParaView GUI Bridge
+```bash
+cd /path/to/paraview-mcp-server
+paraview-mcp-launch
+```
 
-Open ParaView, then run the GUI bridge script from the Python Shell:
+For a local editable checkout:
 
-1. In ParaView, open **Tools -> Python Shell**.
-2. Click **Run Script**.
-3. Select:
-
-```text
-/absolute/path/to/paraview-mcp-server/scripts/start_paraview_gui_bridge.py
+```bash
+.venv/bin/paraview-mcp-launch
 ```
 
 Expected output:
 
 ```text
-ParaView MCP GUI bridge started on 127.0.0.1:9876
+ParaView MCP bridge ready on 127.0.0.1:9876
+Launching ParaView GUI connected to cs://127.0.0.1:11111
 ```
 
-Do not start the live GUI bridge with `paraview --script
-scripts/start_paraview_gui_bridge.py`. ParaView runs startup scripts before the
-embedded GUI Python environment is fully ready for pipeline edits. Use **Tools
--> Python Shell -> Run Script** for the live GUI bridge.
+Keep that terminal running. Closing it stops the GUI, bridge, and local
+`pvserver` session.
 
-If `paraview-mcp-python` is installed into ParaView's Python environment, you
-can also start the live GUI bridge directly from the Python Shell:
-
-```python
-from bridge.gui_bridge import start_gui_bridge, stop_gui_bridge
-start_gui_bridge()
-```
-
-Leave ParaView open. MCP commands now modify this live GUI session.
-
-To stop the bridge from the ParaView Python Shell:
-
-```python
-stop_gui_bridge()
-```
-
-### 2. Optional: Start a Headless `pvpython` Bridge
+### Optional: Start a Headless `pvpython` Bridge
 
 Use this only when you do not need to modify an already-open ParaView GUI:
 
@@ -169,7 +156,7 @@ ParaView bridge ready on 127.0.0.1:9876
 Keep that terminal running. This controls the `pvpython` session, not a GUI
 window opened separately.
 
-### 3. Verify the Bridge Directly
+### Verify the Bridge Directly
 
 Before involving an MCP client, send one raw bridge command:
 
@@ -191,7 +178,7 @@ Expected response shape:
 
 If this fails, fix the bridge before configuring Codex or Claude.
 
-### 4. Register the MCP Server with Codex CLI
+### Register the MCP Server with Codex CLI
 
 If you installed from PyPI:
 
@@ -210,7 +197,7 @@ codex mcp list
 Codex starts the MCP server automatically when needed. The ParaView bridge
 must already be running separately.
 
-### 5. Register with Claude Desktop
+### Register with Claude Desktop
 
 **Claude Desktop** — add to `claude_desktop_config.json`:
 
@@ -232,7 +219,7 @@ which paraview-mcp-server
 
 Restart Claude Desktop after editing the config.
 
-### 6. Verify Through Your MCP Client
+### Verify Through Your MCP Client
 
 With the bridge still running, ask your MCP client:
 
@@ -241,8 +228,8 @@ List all sources in the current ParaView session.
 ```
 
 The client should call `paraview_scene_list_sources` and return the current
-ParaView pipeline sources from the live GUI session if you started
-`start_paraview_gui_bridge.py`.
+ParaView pipeline sources from the server-backed GUI session started by
+`paraview-mcp-launch`.
 
 ---
 
@@ -452,16 +439,17 @@ paraview-mcp-server/
 │   └── paraview_mcp_server/
 │       ├── __init__.py          # Re-exports main()
 │       ├── server.py            # FastMCP stdio server (31 tools)
+│       ├── launcher.py          # Starts pvserver, GUI, and bridge together
 │       └── headless.py          # Headless pvpython executor + job manager
 ├── bridge/
 │   ├── __init__.py
 │   ├── server.py                # TCP socket bridge server
-│   ├── gui_bridge.py            # Non-blocking live GUI bridge lifecycle
+│   ├── gui_bridge.py            # Experimental in-GUI bridge helpers
 │   ├── command_handler.py       # Command registry + paraview.simple handlers (27 commands)
 │   └── execution.py             # trusted local python.execute helper
 ├── scripts/
-│   ├── start_paraview_gui_bridge.py
 │   ├── start_paraview_bridge.py
+│   ├── start_paraview_gui_bridge.py
 │   ├── paraview_bridge_request.py
 │   └── library/                 # Reusable pvpython snippets
 │       ├── open_dataset.py
