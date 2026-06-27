@@ -188,6 +188,8 @@ class TestDataLoadingHandlers:
     def test_source_open_file(self, handler):
         h, pvs = handler
         result = h.handle("source.open_file", {"filepath": "/data/disk.ex2"})
+        assert result["name"] == "disk.ex2"
+        assert result["label"] == "DiskOut"
         assert result["filepath"] == "/data/disk.ex2"
         pvs.OpenDataFile.assert_called_once_with("/data/disk.ex2")
         pvs.Show.assert_called()

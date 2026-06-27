@@ -1,166 +1,286 @@
-"""Pydantic models for bridge command parameter validation.
+"""Dependency-free bridge command parameter validation.
 
-Each model corresponds to a command accepted by the ParaView bridge.
-The CommandHandler calls ``model.model_validate(params)`` on incoming dicts
-so that invalid or missing fields are caught early with clear error messages.
+The bridge runs inside ParaView's ``pvpython``, which commonly does not have
+the MCP server's Python dependencies installed.  These classes intentionally
+provide the small ``model_validate(...).model_dump(...)`` surface used by the
+command handler without importing third-party packages.
 """
 
 from __future__ import annotations
 
-import sys
-
-if sys.version_info >= (3, 11):
-    from typing import Self
-else:
-    from typing_extensions import Self
-
-from pydantic import BaseModel, Field, model_validator
-
-# ── Scene / session ────────────────────────────────────────────────
+from typing import Any, ClassVar
 
 
-class SourceNameParams(BaseModel):
-    name: str = Field(..., description="Pipeline source name")
+class BridgeValidationError(ValueError):
+    """Raised when bridge command parameters are invalid."""
 
 
-class SourceOpenFileParams(BaseModel):
-    filepath: str = Field(..., description="Path to dataset (VTK, VTU, CSV, ExodusII, …)")
+def _missing(name: str) -> BridgeValidationError:
+    return BridgeValidationError(f"Missing required parameter: {name}")
 
 
-class SourceRenameParams(BaseModel):
-    name: str
-    new_name: str
+def _require(params: dict[str, Any], name: str) -> Any:
+    if name not in params or params[name] is None:
+        raise _missing(name)
+    return params[name]
 
 
-# ── Display / coloring ────────────────────────────────────────────
+def _as_str(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise BridgeValidationError(f"{name} must be a non-empty string")
+    return value
 
 
-class DisplayColorByParams(BaseModel):
-    name: str
-    array: str = Field(..., description="Data array name to color by")
-    component: int = Field(-1, description="-1 for magnitude, 0+ for component index")
-    association: str = Field("POINTS", description="POINTS or CELLS")
+def _as_int(value: Any, name: str) -> int:
+    if isinstance(value, bool):
+        raise BridgeValidationError(f"{name} must be an integer")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise BridgeValidationError(f"{name} must be an integer") from exc
 
 
-class DisplaySetRepresentationParams(BaseModel):
-    name: str
-    representation: str = Field(..., description="Surface, Wireframe, Points, Volume, …")
+def _as_float(value: Any, name: str) -> float:
+    if isinstance(value, bool):
+        raise BridgeValidationError(f"{name} must be a number")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise BridgeValidationError(f"{name} must be a number") from exc
 
 
-class DisplaySetOpacityParams(BaseModel):
-    name: str
-    opacity: float = Field(..., ge=0.0, le=1.0, description="Transparency: 0.0 = invisible, 1.0 = opaque")
+def _as_bool(value: Any) -> bool:
+    return bool(value)
 
 
-# ── Camera / view ─────────────────────────────────────────────────
+def _as_dict(value: Any, name: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise BridgeValidationError(f"{name} must be an object")
+    return value
 
 
-class ViewSetCameraParams(BaseModel):
-    position: list[float] | None = Field(None, min_length=3, max_length=3)
-    focal_point: list[float] | None = Field(None, min_length=3, max_length=3)
-    view_up: list[float] | None = Field(None, min_length=3, max_length=3)
-    parallel_scale: float | None = None
+def _as_vec3(value: Any, name: str) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise BridgeValidationError(f"{name} must be a three-item list")
+    return [_as_float(item, name) for item in value]
 
 
-class ViewSetBackgroundParams(BaseModel):
-    color: list[float] = Field(..., description="RGB [r, g, b] in 0-1 range", min_length=3, max_length=3)
-    color2: list[float] | None = Field(None, description="Gradient bottom color", min_length=3, max_length=3)
+def _as_float_list(value: Any, name: str) -> list[float]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise BridgeValidationError(f"{name} must be a non-empty list")
+    return [_as_float(item, name) for item in value]
 
 
-# ── Export ─────────────────────────────────────────────────────────
+class BridgeParams:
+    defaults: ClassVar[dict[str, Any]] = {}
+    required: ClassVar[tuple[str, ...]] = ()
+    strings: ClassVar[tuple[str, ...]] = ()
+    floats: ClassVar[tuple[str, ...]] = ()
+    ints: ClassVar[tuple[str, ...]] = ()
+    bools: ClassVar[tuple[str, ...]] = ()
+    vec3s: ClassVar[tuple[str, ...]] = ()
+    float_lists: ClassVar[tuple[str, ...]] = ()
+    dicts: ClassVar[tuple[str, ...]] = ()
+    positive_ints: ClassVar[tuple[str, ...]] = ()
+    positive_floats: ClassVar[tuple[str, ...]] = ()
+    nonnegative_ints: ClassVar[tuple[str, ...]] = ()
+
+    def __init__(self, values: dict[str, Any]):
+        self._values = values
+
+    @classmethod
+    def model_validate(cls, params: dict[str, Any]):
+        if not isinstance(params, dict):
+            raise BridgeValidationError("params must be an object")
+
+        values = dict(cls.defaults)
+        for name in cls.required:
+            values[name] = _require(params, name)
+
+        for name, value in params.items():
+            if value is not None:
+                values[name] = value
+
+        for name in cls.strings:
+            if name in values:
+                values[name] = _as_str(values[name], name)
+        for name in cls.floats:
+            if name in values:
+                values[name] = _as_float(values[name], name)
+        for name in cls.ints:
+            if name in values:
+                values[name] = _as_int(values[name], name)
+        for name in cls.bools:
+            if name in values:
+                values[name] = _as_bool(values[name])
+        for name in cls.vec3s:
+            if name in values:
+                values[name] = _as_vec3(values[name], name)
+        for name in cls.float_lists:
+            if name in values:
+                values[name] = _as_float_list(values[name], name)
+        for name in cls.dicts:
+            if name in values:
+                values[name] = _as_dict(values[name], name)
+
+        cls._validate_ranges(values)
+        cls._validate(values)
+        return cls(values)
+
+    @classmethod
+    def _validate_ranges(cls, values: dict[str, Any]) -> None:
+        for name in cls.positive_ints:
+            if name in values and values[name] <= 0:
+                raise BridgeValidationError(f"{name} must be greater than 0")
+        for name in cls.positive_floats:
+            if name in values and values[name] <= 0:
+                raise BridgeValidationError(f"{name} must be greater than 0")
+        for name in cls.nonnegative_ints:
+            if name in values and values[name] < 0:
+                raise BridgeValidationError(f"{name} must be greater than or equal to 0")
+
+    @classmethod
+    def _validate(cls, values: dict[str, Any]) -> None:
+        return None
+
+    def model_dump(self, *, exclude_none: bool = False) -> dict[str, Any]:
+        if not exclude_none:
+            return dict(self._values)
+        return {key: value for key, value in self._values.items() if value is not None}
 
 
-class ExportScreenshotParams(BaseModel):
-    filepath: str
-    width: int = Field(1920, gt=0)
-    height: int = Field(1080, gt=0)
-    transparent: bool = Field(False)
+class SourceNameParams(BridgeParams):
+    required = ("name",)
+    strings = ("name",)
 
 
-class ExportDataParams(BaseModel):
-    name: str
-    filepath: str
+class SourceOpenFileParams(BridgeParams):
+    required = ("filepath",)
+    strings = ("filepath",)
 
 
-class ExportAnimationParams(BaseModel):
-    filepath: str
-    width: int = Field(1920, gt=0)
-    height: int = Field(1080, gt=0)
-    frame_rate: int = Field(15, gt=0)
-    frame_start: int | None = Field(None, ge=0)
-    frame_end: int | None = Field(None, ge=0)
-
-    @model_validator(mode="after")
-    def validate_frame_window(self) -> Self:
-        if (self.frame_start is None) != (self.frame_end is None):
-            raise ValueError("frame_start and frame_end must be provided together")
-        if self.frame_start is not None and self.frame_end is not None and self.frame_start > self.frame_end:
-            raise ValueError("frame_start must be less than or equal to frame_end")
-        return self
+class SourceRenameParams(BridgeParams):
+    required = ("name", "new_name")
+    strings = ("name", "new_name")
 
 
-# ── Filters — basic ───────────────────────────────────────────────
+class DisplayColorByParams(BridgeParams):
+    defaults = {"component": -1, "association": "POINTS"}
+    required = ("name", "array")
+    strings = ("name", "array", "association")
+    ints = ("component",)
 
 
-class FilterSliceParams(BaseModel):
-    input: str = Field(..., description="Source name to slice")
-    origin: list[float] | None = Field(None, min_length=3, max_length=3)
-    normal: list[float] | None = Field(None, min_length=3, max_length=3)
+class DisplaySetRepresentationParams(BridgeParams):
+    required = ("name", "representation")
+    strings = ("name", "representation")
 
 
-class FilterClipParams(BaseModel):
-    input: str
-    origin: list[float] | None = Field(None, min_length=3, max_length=3)
-    normal: list[float] | None = Field(None, min_length=3, max_length=3)
+class DisplaySetOpacityParams(BridgeParams):
+    required = ("name", "opacity")
+    strings = ("name",)
+    floats = ("opacity",)
+
+    @classmethod
+    def _validate(cls, values: dict[str, Any]) -> None:
+        if values["opacity"] < 0.0 or values["opacity"] > 1.0:
+            raise BridgeValidationError("opacity must be between 0.0 and 1.0")
 
 
-class FilterContourParams(BaseModel):
-    input: str
-    array: str = Field(..., description="Scalar array name")
-    values: list[float] = Field(..., description="Isosurface values", min_length=1)
+class ViewSetCameraParams(BridgeParams):
+    vec3s = ("position", "focal_point", "view_up")
+    floats = ("parallel_scale",)
 
 
-class FilterThresholdParams(BaseModel):
-    input: str
-    array: str
-    lower: float
-    upper: float
+class ViewSetBackgroundParams(BridgeParams):
+    required = ("color",)
+    vec3s = ("color", "color2")
 
 
-# ── Filters — advanced ────────────────────────────────────────────
+class ExportScreenshotParams(BridgeParams):
+    defaults = {"width": 1920, "height": 1080, "transparent": False}
+    required = ("filepath",)
+    strings = ("filepath",)
+    ints = ("width", "height")
+    bools = ("transparent",)
+    positive_ints = ("width", "height")
 
 
-class FilterCalculatorParams(BaseModel):
-    input: str
-    expression: str
-    result_name: str = Field("Result")
-    attribute_type: str = Field("Point Data", description="Point Data or Cell Data")
+class ExportDataParams(BridgeParams):
+    required = ("name", "filepath")
+    strings = ("name", "filepath")
 
 
-class FilterStreamTracerParams(BaseModel):
-    input: str
-    seed_type: str = Field("Line", description="Line or Point Cloud")
-    integration_direction: str = Field("BOTH", description="FORWARD, BACKWARD, or BOTH")
-    num_points: int = Field(100, gt=0)
-    max_length: float | None = None
+class ExportAnimationParams(BridgeParams):
+    defaults = {"width": 1920, "height": 1080, "frame_rate": 15}
+    required = ("filepath",)
+    strings = ("filepath",)
+    ints = ("width", "height", "frame_rate", "frame_start", "frame_end")
+    positive_ints = ("width", "height", "frame_rate")
+    nonnegative_ints = ("frame_start", "frame_end")
+
+    @classmethod
+    def _validate(cls, values: dict[str, Any]) -> None:
+        if ("frame_start" in values) != ("frame_end" in values):
+            raise BridgeValidationError("frame_start and frame_end must be provided together")
+        if "frame_start" in values and values["frame_start"] > values["frame_end"]:
+            raise BridgeValidationError("frame_start must be less than or equal to frame_end")
 
 
-class FilterGlyphParams(BaseModel):
-    input: str
-    glyph_type: str = Field("Arrow", description="Arrow, Sphere, Cone, …")
-    scale_factor: float = Field(1.0, gt=0)
-    scale_array: str | None = None
+class FilterSliceParams(BridgeParams):
+    required = ("input",)
+    strings = ("input",)
+    vec3s = ("origin", "normal")
 
 
-# ── Python execution ───────────────────────────────────────────────
+class FilterClipParams(FilterSliceParams):
+    pass
 
 
-class PythonExecuteParams(BaseModel):
-    code: str | None = Field(None, description="Inline Python code")
-    script_path: str | None = Field(None, description="Path to a .py script file")
-    args: dict | None = Field(None, description="Keyword arguments passed to the script namespace")
-    timeout_seconds: float | None = Field(None, gt=0)
+class FilterContourParams(BridgeParams):
+    required = ("input", "array", "values")
+    strings = ("input", "array")
+    float_lists = ("values",)
 
 
-class JobIdParams(BaseModel):
-    job_id: str
+class FilterThresholdParams(BridgeParams):
+    required = ("input", "array", "lower", "upper")
+    strings = ("input", "array")
+    floats = ("lower", "upper")
+
+
+class FilterCalculatorParams(BridgeParams):
+    defaults = {"result_name": "Result", "attribute_type": "Point Data"}
+    required = ("input", "expression")
+    strings = ("input", "expression", "result_name", "attribute_type")
+
+
+class FilterStreamTracerParams(BridgeParams):
+    defaults = {"seed_type": "Line", "integration_direction": "BOTH", "num_points": 100}
+    required = ("input",)
+    strings = ("input", "seed_type", "integration_direction")
+    ints = ("num_points",)
+    floats = ("max_length",)
+    positive_ints = ("num_points",)
+
+
+class FilterGlyphParams(BridgeParams):
+    defaults = {"glyph_type": "Arrow", "scale_factor": 1.0}
+    required = ("input",)
+    strings = ("input", "glyph_type", "scale_array")
+    floats = ("scale_factor",)
+    positive_floats = ("scale_factor",)
+
+
+class PythonExecuteParams(BridgeParams):
+    dicts = ("args",)
+    strings = ("code", "script_path")
+    floats = ("timeout_seconds",)
+    positive_floats = ("timeout_seconds",)
+
+
+class JobIdParams(BridgeParams):
+    required = ("job_id",)
+    strings = ("job_id",)
