@@ -31,6 +31,7 @@ class ParaViewBridgeServer:
         from bridge.command_handler import CommandHandler
 
         self._handler = CommandHandler()
+        self._handler_lock = threading.Lock()
 
     def start(self):
         if self._running:
@@ -133,7 +134,8 @@ class ParaViewBridgeServer:
         if not isinstance(params, dict):
             return {"id": req_id, "success": False, "error": "Invalid params: expected JSON object"}
         try:
-            result = self._handler.handle(command, params)
+            with self._handler_lock:
+                result = self._handler.handle(command, params)
             return {"id": req_id, "success": True, "result": result}
         except Exception as exc:
             logger.error("Command '%s' failed: %s\n%s", command, exc, traceback.format_exc())

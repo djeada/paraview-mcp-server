@@ -36,11 +36,11 @@ from bridge.models import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pydantic import BaseModel
+    from bridge.models import BridgeParams
 
 logger = logging.getLogger(__name__)
 
-_VALIDATORS: dict[str, type[BaseModel]] = {
+_VALIDATORS: dict[str, type[BridgeParams]] = {
     "source.get_properties": SourceNameParams,
     "source.open_file": SourceOpenFileParams,
     "source.delete": SourceNameParams,
@@ -155,6 +155,23 @@ class CommandHandler:
                 return proxy
         raise ValueError(f"Source {name!r} not found in the pipeline")
 
+    def _get_source_name(self, proxy: Any) -> str:
+        pvs = self._import_pv()
+        for (src_name, _id), candidate in pvs.GetSources().items():
+            if candidate == proxy:
+                return str(src_name)
+        raise ValueError("Source proxy is not registered in the pipeline")
+
+    @staticmethod
+    def _proxy_has_property(proxy: Any, name: str) -> bool:
+        list_properties = getattr(proxy, "ListProperties", None)
+        if not callable(list_properties):
+            return hasattr(proxy, name)
+        try:
+            return name in list_properties()
+        except Exception:
+            return hasattr(proxy, name)
+
     # ------------------------------------------------------------------
     # Scene / session handlers
     # ------------------------------------------------------------------
@@ -219,9 +236,11 @@ class CommandHandler:
         view = pvs.GetActiveViewOrCreate("RenderView")
         pvs.Show(src, view)
         pvs.ResetCamera(view)
+        name = self._get_source_name(src)
         label = src.GetXMLLabel() if hasattr(src, "GetXMLLabel") else type(src).__name__
         return {
-            "name": label,
+            "name": name,
+            "label": label,
             "filepath": filepath,
             "proxy_class": type(src).__name__,
         }
@@ -347,10 +366,16 @@ class CommandHandler:
         result = {"color": color, "gradient": "color2" in params}
         if "color2" in params:
             view.Background2 = params["color2"]
-            view.UseGradientBackground = True
+            if self._proxy_has_property(view, "BackgroundColorMode"):
+                view.BackgroundColorMode = "Gradient"
+            else:
+                view.UseGradientBackground = True
             result["color2"] = params["color2"]
         else:
-            view.UseGradientBackground = False
+            if self._proxy_has_property(view, "BackgroundColorMode"):
+                view.BackgroundColorMode = "Single Color"
+            else:
+                view.UseGradientBackground = False
         return result
 
     # ------------------------------------------------------------------
@@ -452,7 +477,13 @@ class CommandHandler:
         upper = float(params["upper"])
         filt = pvs.Threshold(Input=src)
         filt.Scalars = ["POINTS", array]
-        filt.ThresholdRange = [lower, upper]
+        if self._proxy_has_property(filt, "ThresholdRange"):
+            filt.ThresholdRange = [lower, upper]
+        else:
+            filt.LowerThreshold = lower
+            filt.UpperThreshold = upper
+            if self._proxy_has_property(filt, "ThresholdMethod"):
+                filt.ThresholdMethod = "Between"
         view = pvs.GetActiveViewOrCreate("RenderView")
         pvs.Show(filt, view)
         return {
