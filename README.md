@@ -1,47 +1,96 @@
-# paraview-mcp-server
+# ParaView MCP Server
 
 **Control ParaView with AI assistants through the Model Context Protocol.**
 
-`paraview-mcp-server` is a two-process bridge that lets AI assistants such as Claude Desktop
-and Codex CLI open datasets, apply filters, color data, and export screenshots in ParaView
-using natural language.
+`paraview-mcp-python` provides an MCP server plus a ParaView-side bridge so
+AI assistants such as Codex CLI and Claude Desktop can inspect a ParaView
+session, open datasets, apply filters, color data, run ParaView Python, and
+export screenshots.
+
+The command installed for MCP clients is still:
+
+```bash
+paraview-mcp-server
+```
 
 ---
 
-## How it works
+## What Parts Are There?
+
+There are three moving pieces:
+
+| Part | Runs where | Purpose |
+|---|---|---|
+| **MCP client** | Codex CLI, Claude Desktop, or another MCP host | Starts the MCP server and calls tools. |
+| **MCP server** | Normal Python environment | Speaks MCP over stdio and forwards tool calls to ParaView over TCP. |
+| **ParaView bridge** | `pvpython` / ParaView Python runtime | Receives TCP JSON commands and executes `paraview.simple` operations. |
+
+The ParaView bridge is the ParaView-side component. It plays the same role as
+the Blender add-on in `blender-mcp-server`, but it is not currently a ParaView
+GUI plug-in and it does not attach to an already-open ParaView GUI window. It
+starts its own ParaView Python session through `pvpython`.
 
 ```
-MCP Client (Claude Desktop, Codex CLI, …)
-      ⇅  stdio
-paraview-mcp-server            ← thin MCP server, defines 31 tools
-      ⇅  JSON / TCP localhost:9876
-ParaView bridge (pvpython)     ← dispatches commands with paraview.simple
-      ⇅
-paraview.simple / servermanager
+┌──────────────────────────────┐      stdio      ┌────────────────────────┐
+│ MCP Client                   │ ◄──────────────► │ MCP Server             │
+│ Codex / Claude / other host  │                  │ paraview-mcp-server    │
+└──────────────────────────────┘                  └──────────┬─────────────┘
+                                                              │ JSON/TCP
+                                                              │ 127.0.0.1:9876
+                                                   ┌──────────▼─────────────┐
+                                                   │ ParaView Bridge        │
+                                                   │ pvpython process       │
+                                                   └──────────┬─────────────┘
+                                                              │
+                                                   ┌──────────▼─────────────┐
+                                                   │ paraview.simple        │
+                                                   │ ParaView runtime       │
+                                                   └────────────────────────┘
 ```
 
-- The **MCP server** is a normal Python package. It speaks MCP over stdio and forwards
-  every tool call as a JSON request to the bridge over a local TCP socket.
-- The **bridge** runs inside `pvpython`. It receives JSON commands, dispatches them through
-  a command registry, calls `paraview.simple`, and returns JSON results.
-- Neither process depends on the other's code at import time.
-- A **headless pvpython executor** lets the MCP server run scripts in a separate
-  `pvpython` process for long-running or async workflows (no bridge needed).
+Why `pvpython`? ParaView's useful automation API is `paraview.simple`, and it
+is available inside ParaView's Python runtime. The MCP server itself is only a
+protocol adapter; it cannot execute ParaView operations without a ParaView-side
+Python process.
+
+This means the current setup is:
+
+```text
+Codex/Claude -> MCP server -> pvpython bridge -> ParaView runtime
+```
+
+not:
+
+```text
+Codex/Claude -> MCP server -> already-open ParaView GUI
+```
 
 See [`docs/architecture.md`](docs/architecture.md) for a full diagram, protocol reference,
 and tool namespace table.
 
 ---
 
-## Quick start
+## Install
 
-### 1. Install the MCP server
+### Option A: Install the MCP server from PyPI
+
+Use this when you only need the MCP server executable in your normal Python
+environment:
 
 ```bash
 pip install paraview-mcp-python
 ```
 
-For local development from this repository:
+This installs:
+
+```bash
+paraview-mcp-server
+```
+
+### Option B: Clone this repository for the ParaView bridge
+
+The bridge code must be available to `pvpython`. For development and local
+desktop use, clone the repository:
 
 ```bash
 git clone https://github.com/djeada/paraview-mcp-server.git
@@ -51,18 +100,83 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-### 2. Start the ParaView bridge
-
-In a terminal that has `pvpython` on `PATH`:
+This creates:
 
 ```bash
-pvpython scripts/start_paraview_bridge.py
-# → ParaView bridge ready on 127.0.0.1:9876
+.venv/bin/paraview-mcp-server
 ```
 
-The bridge listens for JSON commands from the MCP server.
+---
 
-### 3. Register the MCP server with your AI client
+## Start Everything
+
+Start the pieces in this order.
+
+### 1. Start the ParaView Bridge
+
+Open a terminal in this repository and run:
+
+```bash
+cd /path/to/paraview-mcp-server
+pvpython scripts/start_paraview_bridge.py
+```
+
+Expected output:
+
+```text
+ParaView bridge ready on 127.0.0.1:9876
+```
+
+Keep this terminal running. It is the ParaView-side bridge.
+
+If `pvpython` is not on `PATH`, use the full path, for example:
+
+```bash
+/opt/ParaView/bin/pvpython scripts/start_paraview_bridge.py
+```
+
+### 2. Verify the Bridge Directly
+
+Before involving an MCP client, send one raw bridge command:
+
+```bash
+python scripts/paraview_bridge_request.py scene.get_info
+```
+
+Expected response shape:
+
+```json
+{
+  "success": true,
+  "result": {
+    "source_count": 0,
+    "active_view_type": "RenderView"
+  }
+}
+```
+
+If this fails, fix the bridge before configuring Codex or Claude.
+
+### 3. Register the MCP Server with Codex CLI
+
+If you installed from PyPI:
+
+```bash
+codex mcp add paraview -- paraview-mcp-server
+codex mcp list
+```
+
+If you are using the local repository:
+
+```bash
+codex mcp add paraview -- /absolute/path/to/paraview-mcp-server/.venv/bin/paraview-mcp-server
+codex mcp list
+```
+
+Codex starts the MCP server automatically when needed. The ParaView bridge
+must already be running separately.
+
+### 4. Register with Claude Desktop
 
 **Claude Desktop** — add to `claude_desktop_config.json`:
 
@@ -76,11 +190,40 @@ The bridge listens for JSON commands from the MCP server.
 }
 ```
 
-**Codex CLI:**
+For a PyPI install, use the absolute path returned by:
 
 ```bash
-codex mcp add paraview -- /absolute/path/to/.venv/bin/paraview-mcp-server
+which paraview-mcp-server
 ```
+
+Restart Claude Desktop after editing the config.
+
+### 5. Verify Through Your MCP Client
+
+With the bridge still running, ask your MCP client:
+
+```text
+List all sources in the current ParaView session.
+```
+
+The client should call `paraview_scene_list_sources` and return the current
+ParaView pipeline sources.
+
+---
+
+## What Can It Control?
+
+There are two levels of control:
+
+1. **Fixed MCP tools** for common workflows: scene inspection, loading data,
+   filters, display/coloring, camera, screenshots, data export, and animation
+   export.
+2. **Python execution** through `paraview_python_exec`, which can run trusted
+   local Python inside the ParaView bridge session. Use this for anything not
+   covered by a fixed tool, including arbitrary `paraview.simple` scripts.
+
+So the fixed tool list is intentionally finite, but the Python execution tool
+is the general escape hatch for the broader ParaView API.
 
 ---
 
