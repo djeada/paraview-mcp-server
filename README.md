@@ -2,18 +2,13 @@
 
 **Control ParaView with AI assistants through the Model Context Protocol.**
 
-`paraview-mcp-python` provides an MCP server plus a ParaView-side bridge so
-AI assistants such as Codex CLI and Claude Desktop can inspect a ParaView
-session, open datasets, apply filters, color data, run ParaView Python, and
-export screenshots.
+`paraview-mcp-python` provides an MCP server plus a ParaView-side bridge so AI assistants such as Codex CLI and Claude Desktop can inspect a ParaView session, open datasets, apply filters, color data, run ParaView Python, and export screenshots.
 
 The command installed for MCP clients is still:
 
 ```bash
 paraview-mcp-server
 ```
-
----
 
 ## What Parts Are There?
 
@@ -25,16 +20,13 @@ There are three moving pieces:
 | **MCP server** | Normal Python environment | Speaks MCP over stdio and forwards tool calls to ParaView over TCP. |
 | **ParaView bridge** | `pvpython` / ParaView Python runtime | Receives TCP JSON commands and executes `paraview.simple` operations. |
 
-The ParaView bridge is the ParaView-side component. It plays the same role as
-the Blender add-on in `blender-mcp-server`, but it is not currently a ParaView
-GUI plug-in and it does not attach to an already-open ParaView GUI window. It
-starts its own ParaView Python session through `pvpython`.
+The ParaView bridge is the ParaView-side component. It plays the same role as the Blender add-on in `blender-mcp-server`, but it is not currently a ParaView GUI plug-in and it does not attach to an already-open ParaView GUI window. It starts its own ParaView Python session through `pvpython`.
 
 ```
-┌──────────────────────────────┐      stdio      ┌────────────────────────┐
+┌──────────────────────────────┐      stdio       ┌────────────────────────┐
 │ MCP Client                   │ ◄──────────────► │ MCP Server             │
 │ Codex / Claude / other host  │                  │ paraview-mcp-server    │
-└──────────────────────────────┘                  └──────────┬─────────────┘
+└──────────────────────────────┘                  └───────────┬────────────┘
                                                               │ JSON/TCP
                                                               │ 127.0.0.1:9876
                                                    ┌──────────▼─────────────┐
@@ -48,10 +40,7 @@ starts its own ParaView Python session through `pvpython`.
                                                    └────────────────────────┘
 ```
 
-Why `pvpython`? ParaView's useful automation API is `paraview.simple`, and it
-is available inside ParaView's Python runtime. The MCP server itself is only a
-protocol adapter; it cannot execute ParaView operations without a ParaView-side
-Python process.
+Why `pvpython`? ParaView's useful automation API is `paraview.simple`, and it is available inside ParaView's Python runtime. The MCP server itself is only a protocol adapter; it cannot execute ParaView operations without a ParaView-side Python process.
 
 This means the current setup is:
 
@@ -65,17 +54,13 @@ not:
 Codex/Claude -> MCP server -> already-open ParaView GUI
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for a full diagram, protocol reference,
-and tool namespace table.
-
----
+See [`docs/architecture.md`](docs/architecture.md) for a full diagram, protocol reference, and tool namespace table.
 
 ## Install
 
 ### Option A: Install the MCP server from PyPI
 
-Use this when you only need the MCP server executable in your normal Python
-environment:
+Use this when you only need the MCP server executable in your normal Python environment:
 
 ```bash
 pip install paraview-mcp-python
@@ -89,8 +74,7 @@ paraview-mcp-server
 
 ### Option B: Clone this repository for the ParaView bridge
 
-The bridge code must be available to `pvpython`. For development and local
-desktop use, clone the repository:
+The bridge code must be available to `pvpython`. For development and local desktop use, clone the repository:
 
 ```bash
 git clone https://github.com/djeada/paraview-mcp-server.git
@@ -105,8 +89,6 @@ This creates:
 ```bash
 .venv/bin/paraview-mcp-server
 ```
-
----
 
 ## Start Everything
 
@@ -173,8 +155,7 @@ codex mcp add paraview -- /absolute/path/to/paraview-mcp-server/.venv/bin/paravi
 codex mcp list
 ```
 
-Codex starts the MCP server automatically when needed. The ParaView bridge
-must already be running separately.
+Codex starts the MCP server automatically when needed. The ParaView bridge must already be running separately.
 
 ### 4. Register with Claude Desktop
 
@@ -209,23 +190,14 @@ List all sources in the current ParaView session.
 The client should call `paraview_scene_list_sources` and return the current
 ParaView pipeline sources.
 
----
-
 ## What Can It Control?
 
 There are two levels of control:
 
-1. **Fixed MCP tools** for common workflows: scene inspection, loading data,
-   filters, display/coloring, camera, screenshots, data export, and animation
-   export.
-2. **Python execution** through `paraview_python_exec`, which can run trusted
-   local Python inside the ParaView bridge session. Use this for anything not
-   covered by a fixed tool, including arbitrary `paraview.simple` scripts.
+1. **Fixed MCP tools** for common workflows: scene inspection, loading data, filters, display/coloring, camera, screenshots, data export, and animation export.
+2. **Python execution** through `paraview_python_exec`, which can run trusted local Python inside the ParaView bridge session. Use this for anything not covered by a fixed tool, including arbitrary `paraview.simple` scripts.
 
-So the fixed tool list is intentionally finite, but the Python execution tool
-is the general escape hatch for the broader ParaView API.
-
----
+So the fixed tool list is intentionally finite, but the Python execution tool is the general escape hatch for the broader ParaView API.
 
 ## Example prompts
 
@@ -241,11 +213,10 @@ Once both processes are running and your MCP client is configured:
 - *"Set the background to a gradient from white to dark blue."*
 - *"Export an animation to `/tmp/anim.avi`."*
 
----
-
 ## Tool reference (31 tools)
 
 ### Scene / session
+
 | Tool | Description |
 |---|---|
 | `paraview_scene_get_info` | Session info: source count, active view type |
@@ -254,6 +225,7 @@ Once both processes are running and your MCP client is configured:
 | `paraview_source_get_properties` | Properties of a named source |
 
 ### Data loading
+
 | Tool | Description |
 |---|---|
 | `paraview_source_open_file` | Open a dataset (VTK, VTU, ExodusII, CSV, …) |
@@ -261,6 +233,7 @@ Once both processes are running and your MCP client is configured:
 | `paraview_source_rename` | Rename a source |
 
 ### Filters — basic
+
 | Tool | Description |
 |---|---|
 | `paraview_filter_slice` | Slice filter with origin + normal |
@@ -269,6 +242,7 @@ Once both processes are running and your MCP client is configured:
 | `paraview_filter_threshold` | Threshold filter by scalar range |
 
 ### Filters — advanced
+
 | Tool | Description |
 |---|---|
 | `paraview_filter_calculator` | Calculator filter with expression |
@@ -276,6 +250,7 @@ Once both processes are running and your MCP client is configured:
 | `paraview_filter_glyph` | Glyph filter for vector visualization |
 
 ### Display / coloring
+
 | Tool | Description |
 |---|---|
 | `paraview_display_show` | Make a source visible |
@@ -286,6 +261,7 @@ Once both processes are running and your MCP client is configured:
 | `paraview_display_rescale_transfer_function` | Rescale color map to data range |
 
 ### Camera / view
+
 | Tool | Description |
 |---|---|
 | `paraview_view_reset_camera` | Fit all visible sources in the view |
@@ -293,6 +269,7 @@ Once both processes are running and your MCP client is configured:
 | `paraview_view_set_background` | Set solid or gradient background color |
 
 ### Export
+
 | Tool | Description |
 |---|---|
 | `paraview_export_screenshot` | Save a PNG or JPEG screenshot |
@@ -300,19 +277,19 @@ Once both processes are running and your MCP client is configured:
 | `paraview_export_animation` | Export animation to video/frames |
 
 ### Python execution
+
 | Tool | Description |
 |---|---|
 | `paraview_python_exec` | Run Python in bridge or headless pvpython |
 | `paraview_python_exec_async` | Start a long-running Python job (headless) |
 
 ### Job management
+
 | Tool | Description |
 |---|---|
 | `paraview_job_status` | Get status of an async job |
 | `paraview_job_cancel` | Cancel a running async job |
 | `paraview_job_list` | List all known async jobs |
-
----
 
 ## Python execution
 
@@ -352,10 +329,7 @@ pvs.ResetCamera(view)
 __result__ = {"done": True}
 ```
 
-See [`docs/python-execute-design.md`](docs/python-execute-design.md) for the full design,
-schema reference, and more examples.
-
----
+See [`docs/python-execute-design.md`](docs/python-execute-design.md) for the full design, schema reference, and more examples.
 
 ## Async job execution
 
@@ -367,19 +341,14 @@ For long-running pipelines, use `paraview_python_exec_async`:
 
 Async jobs run in a separate headless `pvpython` process via `HeadlessPvpythonExecutor`.
 
----
-
 ## Python execution trust model
 
-- **Trusted local execution** — `paraview_python_exec` can run arbitrary Python available to `pvpython`,
-  including imports and full `paraview.simple` workflows.
+- **Trusted local execution** — `paraview_python_exec` can run arbitrary Python available to `pvpython`, including imports and full `paraview.simple` workflows.
 - **Output bounding** — stdout/stderr capped at **50 KB**.
 - **Cooperative timeout** — default 30 seconds per script execution.
 - **Script path validation** — optionally restrict execution to approved root directories.
 - The bridge runs inside `pvpython` with the same trust level as a local ParaView session.
 - This is a local desktop automation tool — not a public API sandbox.
-
----
 
 ## Development
 
@@ -405,9 +374,6 @@ python scripts/paraview_bridge_request.py scene.get_info
 python scripts/paraview_bridge_request.py source.open_file --params '{"filepath":"/data/disk.vtu"}'
 python scripts/paraview_bridge_request.py export.screenshot --params '{"filepath":"/tmp/shot.png"}'
 ```
-
----
-
 ## Project structure
 
 ```
@@ -441,8 +407,6 @@ paraview-mcp-server/
     ├── test_protocol.py         # Wire encoding, fake bridge integration
     └── test_command_handler.py  # All 27 handlers + execution controls
 ```
-
----
 
 ## License
 
