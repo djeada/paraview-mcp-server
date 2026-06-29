@@ -3,8 +3,14 @@
 import asyncio
 import json
 import logging
+import os
+import socket
+import subprocess
+import sys
+import time
 import uuid
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -16,6 +22,82 @@ logger = logging.getLogger(__name__)
 PARAVIEW_HOST = "127.0.0.1"
 PARAVIEW_PORT = 9876
 HEADLESS_JOB_MANAGER = HeadlessJobManager()
+SESSION_PROCESS: subprocess.Popen[bytes] | None = None
+SESSION_LOG_PATH = Path(os.environ.get("PARAVIEW_MCP_SESSION_LOG", "/tmp/paraview-mcp-launch.log"))
+
+
+def _port_is_open(host: str, port: int, *, timeout: float = 0.3) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_open_port(host: str, port: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _port_is_open(host, port):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _launcher_command(
+    *,
+    paraview: str | None,
+    pvserver: str | None,
+    pvpython: str | None,
+    server_host: str,
+    server_port: int,
+    bridge_host: str,
+    bridge_port: int,
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "paraview_mcp_server.launcher",
+        "--server-host",
+        server_host,
+        "--server-port",
+        str(server_port),
+        "--bridge-host",
+        bridge_host,
+        "--bridge-port",
+        str(bridge_port),
+    ]
+    if paraview:
+        command.extend(["--paraview", paraview])
+    if pvserver:
+        command.extend(["--pvserver", pvserver])
+    if pvpython:
+        command.extend(["--pvpython", pvpython])
+    return command
+
+
+def _process_state(proc: subprocess.Popen[bytes] | None) -> dict[str, Any]:
+    if proc is None:
+        return {"managed": False, "running": False, "returncode": None}
+    return {
+        "managed": True,
+        "running": proc.poll() is None,
+        "pid": proc.pid,
+        "returncode": proc.poll(),
+    }
+
+
+def _start_process(command: list[str], log_path: Path) -> subprocess.Popen[bytes]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("ab")
+    try:
+        return subprocess.Popen(
+            command,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        log_file.close()
 
 
 class ParaViewConnection:
@@ -129,6 +211,145 @@ mcp = FastMCP(
 
 def _get_conn(ctx: Context) -> ParaViewConnection:
     return ctx.request_context.lifespan_context  # type: ignore[no-any-return]
+
+
+# ======================================================================
+# Session lifecycle tools
+# ======================================================================
+
+
+@mcp.tool(
+    name="paraview_session_status",
+    description=(
+        "Report whether the ParaView MCP bridge is reachable and whether this MCP server owns "
+        "a launched ParaView GUI session process."
+    ),
+)
+async def session_status(
+    ctx: Context,
+    bridge_host: str = PARAVIEW_HOST,
+    bridge_port: int = PARAVIEW_PORT,
+) -> str:
+    del ctx
+    result = {
+        "bridge": {
+            "host": bridge_host,
+            "port": bridge_port,
+            "reachable": _port_is_open(bridge_host, bridge_port),
+        },
+        "session_process": _process_state(SESSION_PROCESS),
+        "log_path": str(SESSION_LOG_PATH),
+    }
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool(
+    name="paraview_session_start",
+    description=(
+        "Start a local ParaView GUI session for MCP control. When no bridge is running, this starts "
+        "pvserver, the ParaView GUI client, and the pvpython bridge through paraview-mcp-launch. "
+        "If an unmanaged bridge is already reachable, it refuses to attach a GUI afterward because "
+        "ParaView must connect the GUI before the pvpython bridge."
+    ),
+)
+async def session_start(
+    ctx: Context,
+    paraview: str | None = None,
+    pvserver: str | None = None,
+    pvpython: str | None = None,
+    server_host: str = "127.0.0.1",
+    server_port: int = 11111,
+    bridge_host: str = PARAVIEW_HOST,
+    bridge_port: int = PARAVIEW_PORT,
+    wait_seconds: float = 8.0,
+) -> str:
+    del ctx
+    global SESSION_PROCESS
+
+    current_state = _process_state(SESSION_PROCESS)
+    if current_state["running"]:
+        return json.dumps(
+            {
+                "started": False,
+                "mode": "already_managed",
+                "session_process": current_state,
+                "bridge_reachable": _port_is_open(bridge_host, bridge_port),
+                "log_path": str(SESSION_LOG_PATH),
+            },
+            indent=2,
+        )
+
+    bridge_already_running = _port_is_open(bridge_host, bridge_port)
+    if bridge_already_running:
+        return json.dumps(
+            {
+                "started": False,
+                "mode": "existing_bridge_not_managed",
+                "bridge_reachable": True,
+                "reason": (
+                    "A ParaView MCP bridge is already reachable, but this MCP server did not start it. "
+                    "Start a clean GUI-backed session with paraview-mcp-launch so the GUI client connects "
+                    "before the pvpython bridge."
+                ),
+                "log_path": str(SESSION_LOG_PATH),
+            },
+            indent=2,
+        )
+
+    command = _launcher_command(
+        paraview=paraview,
+        pvserver=pvserver,
+        pvpython=pvpython,
+        server_host=server_host,
+        server_port=server_port,
+        bridge_host=bridge_host,
+        bridge_port=bridge_port,
+    )
+    mode = "managed_session"
+
+    SESSION_PROCESS = _start_process(command, SESSION_LOG_PATH)
+    bridge_reachable = bridge_already_running or _wait_for_open_port(bridge_host, bridge_port, timeout=wait_seconds)
+    process_returncode = SESSION_PROCESS.poll()
+
+    return json.dumps(
+        {
+            "started": process_returncode is None,
+            "mode": mode,
+            "command": command,
+            "bridge_reachable": bridge_reachable,
+            "session_process": _process_state(SESSION_PROCESS),
+            "log_path": str(SESSION_LOG_PATH),
+        },
+        indent=2,
+    )
+
+
+@mcp.tool(
+    name="paraview_session_stop",
+    description=(
+        "Stop the ParaView session process started by paraview_session_start. This only stops "
+        "processes owned by the current MCP server process."
+    ),
+)
+async def session_stop(ctx: Context) -> str:
+    del ctx
+    global SESSION_PROCESS
+
+    proc = SESSION_PROCESS
+    if proc is None:
+        return json.dumps({"stopped": False, "reason": "no managed session process"}, indent=2)
+
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    result = {"stopped": True, "returncode": proc.returncode, "pid": proc.pid}
+    SESSION_PROCESS = None
+    return json.dumps(result, indent=2)
 
 
 # ======================================================================

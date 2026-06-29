@@ -139,7 +139,14 @@ Every message is a single JSON object terminated by a newline (`\n`).
 
 ---
 
-## Tool namespaces (31 tools)
+## Tool namespaces (34 tools)
+
+### Session lifecycle (3, MCP-only)
+| MCP tool | Description |
+|---|---|
+| `paraview_session_status` | Report bridge reachability and managed session state |
+| `paraview_session_start` | Start a clean GUI-backed ParaView MCP session |
+| `paraview_session_stop` | Stop the session process started by this MCP server |
 
 ### Scene / session (4)
 | MCP tool | Bridge command | Description |
@@ -243,19 +250,23 @@ MCP client
 
 ## Lifecycle
 
-1. User starts the ParaView side with `paraview-mcp-launch`.
+1. User starts the ParaView side with `paraview-mcp-launch`, or an MCP client
+   calls `paraview_session_start`.
 2. The launcher starts `pvserver --multi-clients`.
 3. The launcher connects the ParaView GUI as the first client.
 4. The launcher starts `pvpython scripts/start_paraview_bridge.py --server-host ...`,
    which connects to the same `pvserver` and binds the MCP TCP bridge on
    `127.0.0.1:9876`.
+   This separate bridge is pipeline-only for render-view operations by default:
+   it refuses display, camera, screenshot, animation, and render-related
+   `python.execute` calls to avoid detached VTK windows.
 5. User starts an MCP client (Claude Desktop, Codex CLI, etc.)
 6. MCP client spawns `paraview-mcp-server` over stdio.
 7. MCP server connects to bridge on startup (or lazy-connects on first tool call).
 8. User issues a natural language request → client calls an MCP tool → server
    forwards as JSON → bridge dispatches → returns result.
-9. User exits ParaView or presses Ctrl+C in the launcher terminal to stop the
-   GUI, bridge, and local `pvserver`.
+9. User exits ParaView, presses Ctrl+C in the launcher terminal, or calls
+   `paraview_session_stop` for sessions started by the MCP server.
 
 ---
 

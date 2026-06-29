@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from bridge.models import (
@@ -40,6 +41,26 @@ if TYPE_CHECKING:
     from bridge.models import BridgeParams
 
 logger = logging.getLogger(__name__)
+
+_DETACHED_WINDOW_OPT_IN_ENV = "PARAVIEW_MCP_ALLOW_DETACHED_RENDER_WINDOW"
+_LEGACY_VIEW_CREATE_OPT_IN_ENV = "PARAVIEW_MCP_ALLOW_VIEW_CREATE"
+_GUI_BRIDGE_ENV = "PARAVIEW_MCP_GUI_BRIDGE"
+_PYTHON_RENDER_TOKENS = (
+    "GetActiveViewOrCreate",
+    "CreateRenderView",
+    "GetRenderViews",
+    "GetViews",
+    "GetDisplayProperties",
+    "Show",
+    "Hide",
+    "Render",
+    "StillRender",
+    "ResetCamera",
+    "SaveScreenshot",
+    "SaveAnimation",
+    "ColorBy",
+    "UpdateScalarBars",
+)
 
 _VALIDATORS: dict[str, type[BridgeParams]] = {
     "source.get_properties": SourceNameParams,
@@ -185,6 +206,22 @@ class CommandHandler:
                 pass
         return type(view).__name__ == "RenderView"
 
+    @staticmethod
+    def _render_control_allowed() -> bool:
+        return (
+            os.environ.get(_GUI_BRIDGE_ENV) == "1"
+            or os.environ.get(_DETACHED_WINDOW_OPT_IN_ENV) == "1"
+            or os.environ.get(_LEGACY_VIEW_CREATE_OPT_IN_ENV) == "1"
+        )
+
+    @staticmethod
+    def _render_control_error() -> RuntimeError:
+        return RuntimeError(
+            "Render-view control is disabled from the separate pvpython bridge because it can open "
+            "a detached ParaView/VTK render window. Start the in-GUI bridge for GUI rendering, or set "
+            f"{_DETACHED_WINDOW_OPT_IN_ENV}=1 to explicitly allow detached render windows."
+        )
+
     def _find_render_view(self, pvs: Any) -> Any | None:
         """Return an existing render view without creating a detached VTK window."""
         get_active_view = getattr(pvs, "GetActiveView", None)
@@ -207,20 +244,20 @@ class CommandHandler:
         return None
 
     def _get_render_view(self, pvs: Any, *, required: bool = True) -> Any | None:
+        if not self._render_control_allowed():
+            if required:
+                raise self._render_control_error()
+            return None
+
         view = self._find_render_view(pvs)
         if view is not None:
             return view
 
-        if os.environ.get("PARAVIEW_MCP_GUI_BRIDGE") == "1" or os.environ.get("PARAVIEW_MCP_ALLOW_VIEW_CREATE") == "1":
+        if self._render_control_allowed():
             return pvs.GetActiveViewOrCreate("RenderView")
 
         if required:
-            raise RuntimeError(
-                "No existing RenderView is available to the ParaView MCP bridge. "
-                "Refusing to create one from pvpython because that can open a detached VTK window. "
-                "Create a view in the ParaView GUI, start the in-GUI bridge, or set "
-                "PARAVIEW_MCP_ALLOW_VIEW_CREATE=1 to opt in."
-            )
+            raise RuntimeError("No existing RenderView is available to the ParaView MCP bridge.")
         return None
 
     def _require_render_view(self, pvs: Any) -> Any:
@@ -637,6 +674,8 @@ class CommandHandler:
         script_path = params.get("script_path")
         if not code and not script_path:
             raise ValueError("Missing required parameter 'code' or 'script_path'")
+        if not self._render_control_allowed():
+            self._validate_python_exec_does_not_control_rendering(code=code, script_path=script_path)
         args = params.get("args", {})
         timeout = params.get("timeout_seconds")
         return execute_code(
@@ -645,3 +684,21 @@ class CommandHandler:
             script_path=script_path,
             timeout_seconds=timeout,
         )
+
+    def _validate_python_exec_does_not_control_rendering(self, *, code: str | None, script_path: str | None) -> None:
+        source = code
+        if source is None and script_path is not None:
+            try:
+                source = Path(script_path).read_text(encoding="utf-8")
+            except OSError:
+                return
+        if not source:
+            return
+        blocked = [token for token in _PYTHON_RENDER_TOKENS if token in source]
+        if blocked:
+            raise RuntimeError(
+                "python.execute in the separate pvpython bridge may not call render/view/display APIs "
+                f"because they can open detached windows. Blocked token(s): {', '.join(blocked)}. "
+                "Use fixed pipeline tools without display calls, start the in-GUI bridge, or set "
+                f"{_DETACHED_WINDOW_OPT_IN_ENV}=1 to explicitly allow detached render windows."
+            )

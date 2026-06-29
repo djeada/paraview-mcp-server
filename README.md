@@ -138,6 +138,12 @@ Launching ParaView GUI connected to cs://127.0.0.1:11111
 Keep that terminal running. Closing it stops the GUI, bridge, and local
 `pvserver` session.
 
+MCP clients can also start a clean GUI-backed session by calling
+`paraview_session_start`. If it reports `existing_bridge_not_managed`, stop the
+old bridge-only ParaView processes and start again with `paraview-mcp-launch` or
+`paraview_session_start`; the GUI client must connect before the `pvpython`
+bridge.
+
 ### Optional: Start a Headless `pvpython` Bridge
 
 Use this only when you do not need to modify an already-open ParaView GUI:
@@ -160,19 +166,18 @@ window opened separately.
 
 The default live bridge runs in a separate `pvpython` process connected to the
 same `pvserver` session as the ParaView GUI. It is not running inside the GUI's
-Qt event loop. In that mode, the bridge can modify the ParaView pipeline and
-server-side views, but it cannot reliably inspect or manage GUI top-level
-widgets because Qt bindings such as `PySide6`, `PyQt5`, or `qtpy` may not be
-available in the bridge runtime.
+Qt event loop. In that mode, the bridge can safely modify the ParaView pipeline,
+but it does not control render views by default.
 
-Practical consequences:
+This is intentional. Calling render-view APIs such as
+`GetActiveViewOrCreate("RenderView")`, `Show()`, `Render()`, `SaveScreenshot()`,
+or camera/background tools from a separate `pvpython` client can open a detached
+VTK render window instead of using the visible ParaView GUI layout. The bridge
+therefore blocks display, camera, screenshot, animation, and render-related
+`python.execute` calls unless it is running inside the GUI bridge.
 
-- `GetActiveViewOrCreate("RenderView")`, `Show()`, or `Render()` can create a
-  detached VTK render window instead of reusing the visible GUI layout.
-- The bridge may see a `RenderView` even though the user is looking at a
-  different GUI panel.
-- If a detached VTK window is created, the bridge usually cannot close it via
-  Qt APIs. Use the window manager or delete the server-side view/layout.
+For pipeline automation from the default bridge, create or update sources and
+filters first. Fixed tools return `shown: false` when display is skipped.
 
 For GUI-window automation, start the experimental in-GUI bridge from ParaView's
 Python Shell:
@@ -181,11 +186,8 @@ Python Shell:
 scripts/start_paraview_gui_bridge.py
 ```
 
-For pipeline automation from the default bridge, prefer creating/updating
-sources and filters first. Only call `Show()`/`Render()` after confirming a
-usable render view exists, and prefer `Outline`, `Slice`, `Glyph`, and
-`StreamTracer` filters over displaying large simulation volumes as opaque
-surfaces.
+To deliberately allow the old detached-window behavior for debugging, set
+`PARAVIEW_MCP_ALLOW_DETACHED_RENDER_WINDOW=1` before starting the bridge.
 
 ### Verify the Bridge Directly
 
@@ -296,11 +298,14 @@ Once both processes are running and your MCP client is configured:
 
 ---
 
-## Tool reference (31 tools)
+## Tool reference (34 tools)
 
 ### Scene / session
 | Tool | Description |
 |---|---|
+| `paraview_session_status` | Report bridge reachability and managed GUI session state |
+| `paraview_session_start` | Start a clean GUI-backed ParaView MCP session |
+| `paraview_session_stop` | Stop the session process started by this MCP server |
 | `paraview_scene_get_info` | Session info: source count, active view type |
 | `paraview_scene_list_sources` | List all pipeline sources |
 | `paraview_scene_list_views` | List open render views |
@@ -491,7 +496,7 @@ paraview-mcp-server/
 ├── src/
 │   └── paraview_mcp_server/
 │       ├── __init__.py          # Re-exports main()
-│       ├── server.py            # FastMCP stdio server (31 tools)
+│       ├── server.py            # FastMCP stdio server (34 tools)
 │       ├── launcher.py          # Starts pvserver, GUI, and bridge together
 │       └── headless.py          # Headless pvpython executor + job manager
 ├── bridge/
@@ -515,7 +520,7 @@ paraview-mcp-server/
 │   ├── architecture.md
 │   └── python-execute-design.md
 └── tests/
-    ├── test_server.py           # 31 tools, connection, headless, async jobs
+    ├── test_server.py           # 34 tools, connection, headless, async jobs
     ├── test_protocol.py         # Wire encoding, fake bridge integration
     └── test_command_handler.py  # All 27 handlers + execution controls
 ```

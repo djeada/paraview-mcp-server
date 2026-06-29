@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,6 +23,9 @@ from paraview_mcp_server.server import (
     python_exec_async,
     scene_get_info,
     scene_list_sources,
+    session_start,
+    session_status,
+    session_stop,
     source_open_file,
 )
 
@@ -34,6 +38,9 @@ class TestToolRegistration:
 
     def test_scene_tools_registered(self):
         names = self._get_tool_names()
+        assert "paraview_session_status" in names
+        assert "paraview_session_start" in names
+        assert "paraview_session_stop" in names
         assert "paraview_scene_get_info" in names
         assert "paraview_scene_list_sources" in names
         assert "paraview_scene_list_views" in names
@@ -101,7 +108,7 @@ class TestToolRegistration:
 
     def test_total_tool_count(self):
         names = self._get_tool_names()
-        assert len(names) == 31
+        assert len(names) == 34
 
     def test_all_tools_have_descriptions(self):
         for tool in mcp._tool_manager._tools.values():
@@ -315,6 +322,66 @@ class TestMCPToolFunctions:
         result = json.loads(await scene_get_info(ctx))
         assert result["source_count"] == 2
         conn.send_command.assert_awaited_once_with("scene.get_info")
+
+    @pytest.mark.asyncio
+    async def test_session_status_reports_bridge_and_process_state(self):
+        ctx = MagicMock()
+        with patch("paraview_mcp_server.server._port_is_open", return_value=True):
+            result = json.loads(await session_status(ctx))
+
+        assert result["bridge"]["reachable"] is True
+        assert result["session_process"]["managed"] is False
+
+    @pytest.mark.asyncio
+    async def test_session_start_launches_managed_session_when_bridge_is_not_running(self):
+        ctx = MagicMock()
+        proc = MagicMock()
+        proc.pid = 123
+        proc.poll.return_value = None
+
+        with (
+            patch("paraview_mcp_server.server.SESSION_PROCESS", None),
+            patch("paraview_mcp_server.server._port_is_open", return_value=False),
+            patch("paraview_mcp_server.server._wait_for_open_port", return_value=True),
+            patch("paraview_mcp_server.server._start_process", return_value=proc) as start_process,
+        ):
+            result = json.loads(await session_start(ctx, wait_seconds=0.1))
+
+        assert result["started"] is True
+        assert result["mode"] == "managed_session"
+        assert result["bridge_reachable"] is True
+        assert result["command"][:3] == [sys.executable, "-m", "paraview_mcp_server.launcher"]
+        start_process.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_session_start_refuses_unmanaged_existing_bridge(self):
+        ctx = MagicMock()
+
+        with (
+            patch("paraview_mcp_server.server.SESSION_PROCESS", None),
+            patch("paraview_mcp_server.server._port_is_open", return_value=True),
+            patch("paraview_mcp_server.server._start_process") as start_process,
+        ):
+            result = json.loads(await session_start(ctx, wait_seconds=0.1))
+
+        assert result["started"] is False
+        assert result["mode"] == "existing_bridge_not_managed"
+        assert result["bridge_reachable"] is True
+        start_process.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_session_stop_terminates_managed_process(self):
+        ctx = MagicMock()
+        proc = MagicMock()
+        proc.pid = 789
+        proc.poll.return_value = None
+        proc.returncode = 0
+
+        with patch("paraview_mcp_server.server.SESSION_PROCESS", proc):
+            result = json.loads(await session_stop(ctx))
+
+        assert result == {"stopped": True, "returncode": 0, "pid": 789}
+        proc.terminate.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_scene_list_sources(self):

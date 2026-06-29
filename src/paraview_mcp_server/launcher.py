@@ -51,6 +51,7 @@ def _wait_for_listen_port(port: int, *, timeout: float, name: str) -> None:
 def _ensure_port_available(host: str, port: int, *, name: str) -> None:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((host, port))
     except OSError as exc:
         raise RuntimeError(f"{name} port is already in use on {host}:{port}") from exc

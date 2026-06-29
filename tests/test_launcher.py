@@ -109,3 +109,14 @@ def test_launcher_fails_before_starting_processes_when_port_is_unavailable():
 
     assert result == 1
     popen.assert_not_called()
+
+
+def test_port_preflight_allows_reuseaddr_restart_state():
+    sock = MagicMock()
+    sock.__enter__.return_value = sock
+
+    with patch("paraview_mcp_server.launcher.socket.socket", return_value=sock):
+        launcher._ensure_port_available("127.0.0.1", 9876, name="bridge")
+
+    sock.setsockopt.assert_called_once_with(launcher.socket.SOL_SOCKET, launcher.socket.SO_REUSEADDR, 1)
+    sock.bind.assert_called_once_with(("127.0.0.1", 9876))

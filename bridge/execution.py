@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import threading
 import time
 import traceback
@@ -66,6 +67,118 @@ def _validate_script_path(script_path: str) -> str:
     return resolved
 
 
+def _validate_registration_name(name: str) -> str:
+    if not isinstance(name, str) or not name:
+        raise ValueError("registration name must be a non-empty string")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_. -]*", name):
+        raise ValueError(
+            "registration name may contain letters, numbers, spaces, '.', '_', and '-', "
+            "and must start with a letter or '_'"
+        )
+    return name
+
+
+def _build_polydata_programmable_script(payload: dict[str, Any]) -> str:
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    return f"""
+import json
+import vtk
+
+payload = json.loads({payload_json!r})
+points_data = payload.get("points", [])
+verts_data = payload.get("verts") or []
+lines_data = payload.get("lines") or []
+polys_data = payload.get("polys") or []
+point_data = payload.get("point_data") or {{}}
+cell_data = payload.get("cell_data") or {{}}
+
+points = vtk.vtkPoints()
+for point in points_data:
+    if len(point) != 3:
+        raise ValueError("each point must contain exactly 3 coordinates")
+    points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+
+polydata = vtk.vtkPolyData()
+polydata.SetPoints(points)
+
+def _cell_array(cells):
+    arr = vtk.vtkCellArray()
+    for cell in cells:
+        arr.InsertNextCell(len(cell))
+        for point_id in cell:
+            arr.InsertCellPoint(int(point_id))
+    return arr
+
+if verts_data:
+    polydata.SetVerts(_cell_array(verts_data))
+if lines_data:
+    polydata.SetLines(_cell_array(lines_data))
+if polys_data:
+    polydata.SetPolys(_cell_array(polys_data))
+
+def _add_arrays(attributes, arrays):
+    for name, values in arrays.items():
+        vtk_array = vtk.vtkFloatArray()
+        vtk_array.SetName(str(name))
+        first = values[0] if values else 0.0
+        components = len(first) if isinstance(first, (list, tuple)) else 1
+        vtk_array.SetNumberOfComponents(components)
+        for value in values:
+            if components == 1:
+                vtk_array.InsertNextValue(float(value))
+            else:
+                if len(value) != components:
+                    raise ValueError(f"array {{name!r}} has inconsistent component counts")
+                vtk_array.InsertNextTuple([float(component) for component in value])
+        attributes.AddArray(vtk_array)
+
+_add_arrays(polydata.GetPointData(), point_data)
+_add_arrays(polydata.GetCellData(), cell_data)
+
+self.GetPolyDataOutput().ShallowCopy(polydata)
+"""
+
+
+class ParaViewMCPHelpers:
+    """Small helpers exposed to ``python.execute`` scripts as ``mcp``."""
+
+    def __init__(self, pvs: Any):
+        self._pvs = pvs
+
+    def create_polydata_source(
+        self,
+        name: str,
+        *,
+        points: list,
+        verts: list | None = None,
+        lines: list | None = None,
+        polys: list | None = None,
+        point_data: dict[str, list] | None = None,
+        cell_data: dict[str, list] | None = None,
+    ) -> Any:
+        """Create a pipeline-visible ``vtkPolyData`` source.
+
+        This avoids ``GetClientSideObject()``, which is often ``None`` when the
+        bridge is a separate pvpython client connected to a pvserver session.
+        """
+        if self._pvs is None:
+            raise RuntimeError("paraview.simple is not available")
+        source_name = _validate_registration_name(name)
+        payload = {
+            "points": points,
+            "verts": verts or [],
+            "lines": lines or [],
+            "polys": polys or [],
+            "point_data": point_data or {},
+            "cell_data": cell_data or {},
+        }
+        source = self._pvs.ProgrammableSource(registrationName=source_name)
+        source.OutputDataSetType = "vtkPolyData"
+        source.Script = _build_polydata_programmable_script(payload)
+        source.UpdatePipeline()
+        return source
+
+
 # ---------------------------------------------------------------------------
 # Core execution
 # ---------------------------------------------------------------------------
@@ -116,6 +229,7 @@ def execute_code(
     namespace: dict[str, Any] = {
         "args": args or {},
         "pvs": pvs,
+        "mcp": ParaViewMCPHelpers(pvs),
         "__result__": None,
     }
 

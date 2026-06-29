@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-06-29
+
+### Added
+- Added MCP-managed ParaView session lifecycle tools for starting, stopping, and inspecting GUI-backed sessions.
+- Added a `python.execute` helper namespace with `mcp.create_polydata_source(...)` for publishing custom polydata without relying on unavailable client-side VTK output.
+
+### Fixed
+- Blocked render-view controls from separate `pvpython` bridge sessions unless explicitly enabled, preventing accidental detached render windows.
+- Kept pipeline-only source and filter operations usable when render-view control is disabled.
+
 ## [0.1.6] — 2026-06-29
 
 ### Fixed
@@ -60,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Unit tests: 85 tests covering bridge handlers, TCP protocol, MCP server
   tools, headless executor, and async job lifecycle.
 
-[Unreleased]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/djeada/paraview-mcp-server/releases/tag/v0.1.4

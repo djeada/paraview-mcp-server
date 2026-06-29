@@ -105,10 +105,25 @@ def _make_pv_mock():
 
 
 @pytest.fixture()
-def handler():
+def handler(monkeypatch):
     """Provide a CommandHandler with _import_pv patched to return a mock pvs."""
     from bridge.command_handler import CommandHandler
 
+    monkeypatch.setenv("PARAVIEW_MCP_GUI_BRIDGE", "1")
+    h = CommandHandler()
+    pvs = _make_pv_mock()
+    h._import_pv = lambda: pvs  # type: ignore[method-assign]
+    return h, pvs
+
+
+@pytest.fixture()
+def safe_handler(monkeypatch):
+    """Provide a separate pvpython bridge handler with render control disabled."""
+    from bridge.command_handler import CommandHandler
+
+    monkeypatch.delenv("PARAVIEW_MCP_GUI_BRIDGE", raising=False)
+    monkeypatch.delenv("PARAVIEW_MCP_ALLOW_DETACHED_RENDER_WINDOW", raising=False)
+    monkeypatch.delenv("PARAVIEW_MCP_ALLOW_VIEW_CREATE", raising=False)
     h = CommandHandler()
     pvs = _make_pv_mock()
     h._import_pv = lambda: pvs  # type: ignore[method-assign]
@@ -189,8 +204,8 @@ class TestSceneHandlers:
         with pytest.raises(ValueError, match="not found"):
             h.handle("source.get_properties", {"name": "missing.vtu"})
 
-    def test_scene_get_info_does_not_create_view_when_none_exists(self, handler):
-        h, pvs = handler
+    def test_scene_get_info_does_not_create_view_when_none_exists(self, safe_handler):
+        h, pvs = safe_handler
         pvs.GetActiveView.return_value = None
         pvs.GetRenderViews.return_value = []
         pvs.GetViews.return_value = []
@@ -211,8 +226,8 @@ class TestDataLoadingHandlers:
         pvs.OpenDataFile.assert_called_once_with("/data/disk.ex2")
         pvs.Show.assert_called()
 
-    def test_source_open_file_does_not_create_view_when_none_exists(self, handler):
-        h, pvs = handler
+    def test_source_open_file_does_not_create_view_when_none_exists(self, safe_handler):
+        h, pvs = safe_handler
         pvs.GetActiveView.return_value = None
         pvs.GetRenderViews.return_value = []
         pvs.GetViews.return_value = []
@@ -221,6 +236,13 @@ class TestDataLoadingHandlers:
         pvs.OpenDataFile.assert_called_once_with("/data/disk.ex2")
         pvs.Show.assert_not_called()
         pvs.GetActiveViewOrCreate.assert_not_called()
+
+    def test_source_open_file_does_not_show_from_separate_bridge(self, safe_handler):
+        h, pvs = safe_handler
+        result = h.handle("source.open_file", {"filepath": "/data/disk.ex2"})
+        assert result["shown"] is False
+        pvs.Show.assert_not_called()
+        pvs.ResetCamera.assert_not_called()
 
     def test_source_open_file_returns_none_raises(self, handler):
         h, pvs = handler
@@ -248,12 +270,9 @@ class TestDisplayHandlers:
         assert result["shown"] == "disk.ex2"
         pvs.Show.assert_called()
 
-    def test_display_show_refuses_to_create_detached_view(self, handler):
-        h, pvs = handler
-        pvs.GetActiveView.return_value = None
-        pvs.GetRenderViews.return_value = []
-        pvs.GetViews.return_value = []
-        with pytest.raises(RuntimeError, match="Refusing to create one from pvpython"):
+    def test_display_show_refuses_render_control_from_separate_bridge(self, safe_handler):
+        h, pvs = safe_handler
+        with pytest.raises(RuntimeError, match="Render-view control is disabled"):
             h.handle("display.show", {"name": "disk.ex2"})
         pvs.GetActiveViewOrCreate.assert_not_called()
 
@@ -262,7 +281,8 @@ class TestDisplayHandlers:
         pvs.GetActiveView.return_value = None
         pvs.GetRenderViews.return_value = []
         pvs.GetViews.return_value = []
-        monkeypatch.setenv("PARAVIEW_MCP_ALLOW_VIEW_CREATE", "1")
+        monkeypatch.setenv("PARAVIEW_MCP_ALLOW_DETACHED_RENDER_WINDOW", "1")
+        monkeypatch.delenv("PARAVIEW_MCP_GUI_BRIDGE", raising=False)
         result = h.handle("display.show", {"name": "disk.ex2"})
         assert result["shown"] == "disk.ex2"
         pvs.GetActiveViewOrCreate.assert_called_once_with("RenderView")
@@ -427,6 +447,16 @@ class TestBasicFilterHandlers:
         assert result["origin"] == [1, 2, 3]
         pvs.Slice.assert_called_once()
 
+    def test_filter_slice_does_not_show_from_separate_bridge(self, safe_handler):
+        h, pvs = safe_handler
+        result = h.handle(
+            "filter.slice",
+            {"input": "disk.ex2", "origin": [1, 2, 3], "normal": [0, 1, 0]},
+        )
+        assert result["filter"] == "Slice"
+        assert result["shown"] is False
+        pvs.Show.assert_not_called()
+
     def test_filter_slice_defaults(self, handler):
         h, pvs = handler
         result = h.handle("filter.slice", {"input": "disk.ex2"})
@@ -570,6 +600,11 @@ class TestPythonExecuteHandler:
             finally:
                 os.unlink(f.name)
 
+    def test_python_execute_blocks_render_api_from_separate_bridge(self, safe_handler):
+        h, _ = safe_handler
+        with pytest.raises(RuntimeError, match="detached windows"):
+            h.handle("python.execute", {"code": "from paraview.simple import *\nRender()"})
+
     def test_python_execute_timeout(self, handler):
         h, _ = handler
         result = h.handle(
@@ -618,6 +653,31 @@ class TestExecutionControls:
 
         with pytest.raises(ValueError, match="must be provided"):
             execute_code()
+
+    def test_polydata_helper_validates_registration_name(self):
+        from bridge.execution import _validate_registration_name
+
+        assert _validate_registration_name("Seed Points_1") == "Seed Points_1"
+        with pytest.raises(ValueError, match="registration name"):
+            _validate_registration_name("../bad")
+
+    def test_polydata_helper_generates_programmable_source_script(self):
+        from bridge.execution import _build_polydata_programmable_script
+
+        script = _build_polydata_programmable_script(
+            {
+                "points": [[0, 0, 0], [1, 0, 0]],
+                "verts": [[0], [1]],
+                "lines": [[0, 1]],
+                "polys": [],
+                "point_data": {"U_mag": [40.0, 41.0]},
+                "cell_data": {},
+            }
+        )
+
+        assert "self.GetPolyDataOutput().ShallowCopy(polydata)" in script
+        assert "GetClientSideObject" not in script
+        assert '"U_mag":[40.0,41.0]' in script
 
     def test_export_animation_requires_complete_frame_window(self, handler):
         h, _ = handler
