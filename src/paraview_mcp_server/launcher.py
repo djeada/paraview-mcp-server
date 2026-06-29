@@ -48,6 +48,14 @@ def _wait_for_listen_port(port: int, *, timeout: float, name: str) -> None:
     raise RuntimeError(f"Timed out waiting for {name} to listen on port {port}")
 
 
+def _ensure_port_available(host: str, port: int, *, name: str) -> None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, port))
+    except OSError as exc:
+        raise RuntimeError(f"{name} port is already in use on {host}:{port}") from exc
+
+
 def _terminate(proc: subprocess.Popen[bytes] | None) -> None:
     if proc is None or proc.poll() is not None:
         return
@@ -169,6 +177,9 @@ def main(argv: list[str] | None = None) -> int:
     gui_proc: subprocess.Popen[bytes] | None = None
 
     try:
+        _ensure_port_available("127.0.0.1", args.server_port, name="pvserver")
+        _ensure_port_available(args.bridge_host, args.bridge_port, name="ParaView MCP bridge")
+
         server_proc = subprocess.Popen(
             [
                 pvserver,
@@ -214,6 +225,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     except KeyboardInterrupt:
         return 130
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr, flush=True)
+        return 1
     finally:
         _terminate(gui_proc)
         _terminate(bridge_proc)

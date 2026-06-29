@@ -23,6 +23,7 @@ def test_launcher_starts_gui_before_bridge():
         patch("paraview_mcp_server.launcher._repo_root", return_value=Path.cwd()),
         patch("paraview_mcp_server.launcher._wait_for_listen_port"),
         patch("paraview_mcp_server.launcher._wait_for_port"),
+        patch("paraview_mcp_server.launcher._ensure_port_available"),
         patch("paraview_mcp_server.launcher.time.sleep"),
         patch("paraview_mcp_server.launcher.subprocess.Popen", side_effect=fake_popen),
         patch("paraview_mcp_server.launcher.shutil.which", side_effect=lambda value: value),
@@ -52,6 +53,7 @@ def test_launcher_strips_separator_from_paraview_args():
         patch("paraview_mcp_server.launcher._repo_root", return_value=Path.cwd()),
         patch("paraview_mcp_server.launcher._wait_for_listen_port"),
         patch("paraview_mcp_server.launcher._wait_for_port"),
+        patch("paraview_mcp_server.launcher._ensure_port_available"),
         patch("paraview_mcp_server.launcher.time.sleep"),
         patch("paraview_mcp_server.launcher.subprocess.Popen", side_effect=fake_popen),
         patch("paraview_mcp_server.launcher.shutil.which", side_effect=lambda value: value),
@@ -95,3 +97,15 @@ def test_launcher_restarts_bridge_while_gui_is_running():
     start_bridge.assert_called_once()
     wait_for_port.assert_called_once_with("127.0.0.1", 9876, timeout=20, name="ParaView MCP bridge")
     terminate.assert_called_once_with(restarted_bridge)
+
+
+def test_launcher_fails_before_starting_processes_when_port_is_unavailable():
+    with (
+        patch("paraview_mcp_server.launcher._repo_root", return_value=Path.cwd()),
+        patch("paraview_mcp_server.launcher._ensure_port_available", side_effect=RuntimeError("port busy")),
+        patch("paraview_mcp_server.launcher.subprocess.Popen") as popen,
+    ):
+        result = launcher.main([])
+
+    assert result == 1
+    popen.assert_not_called()

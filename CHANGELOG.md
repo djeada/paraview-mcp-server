@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-06-29
+
+### Fixed
+- Hardened the launcher to fail fast when the pvserver or MCP bridge ports are already in use, avoiding ParaView startup into a known port collision that can segfault.
+
 ## [0.1.5] — 2026-06-29
 
 ### Added
@@ -55,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Unit tests: 85 tests covering bridge handlers, TCP protocol, MCP server
   tools, headless executor, and async job lifecycle.
 
-[Unreleased]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/djeada/paraview-mcp-server/releases/tag/v0.1.4
 [0.1.0]: https://github.com/djeada/paraview-mcp-server/releases/tag/v0.1.0
