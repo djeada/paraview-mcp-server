@@ -59,6 +59,75 @@ def _terminate(proc: subprocess.Popen[bytes] | None) -> None:
         proc.wait(timeout=5)
 
 
+def _start_bridge(
+    *,
+    pvpython: str,
+    bridge_script: Path,
+    bridge_host: str,
+    bridge_port: int,
+    server_host: str,
+    server_port: int,
+    repo_root: Path,
+) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [
+            pvpython,
+            str(bridge_script),
+            "--host",
+            bridge_host,
+            "--port",
+            str(bridge_port),
+            "--server-host",
+            server_host,
+            "--server-port",
+            str(server_port),
+        ],
+        cwd=str(repo_root),
+    )
+
+
+def _wait_for_gui_with_bridge_supervision(
+    *,
+    gui_proc: subprocess.Popen[bytes],
+    bridge_proc: subprocess.Popen[bytes],
+    pvpython: str,
+    bridge_script: Path,
+    bridge_host: str,
+    bridge_port: int,
+    server_host: str,
+    server_port: int,
+    repo_root: Path,
+) -> int:
+    try:
+        while True:
+            try:
+                return gui_proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+
+            bridge_returncode = bridge_proc.poll()
+            if bridge_returncode is None:
+                continue
+
+            print(
+                f"ParaView MCP bridge exited with code {bridge_returncode}; restarting on {bridge_host}:{bridge_port}",
+                flush=True,
+            )
+            bridge_proc = _start_bridge(
+                pvpython=pvpython,
+                bridge_script=bridge_script,
+                bridge_host=bridge_host,
+                bridge_port=bridge_port,
+                server_host=server_host,
+                server_port=server_port,
+                repo_root=repo_root,
+            )
+            _wait_for_port(bridge_host, bridge_port, timeout=20, name="ParaView MCP bridge")
+            print(f"ParaView MCP bridge ready on {bridge_host}:{bridge_port}", flush=True)
+    finally:
+        _terminate(bridge_proc)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -121,24 +190,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         time.sleep(3)
 
-        bridge_proc = subprocess.Popen(
-            [
-                pvpython,
-                str(bridge_script),
-                "--host",
-                args.bridge_host,
-                "--port",
-                str(args.bridge_port),
-                "--server-host",
-                args.server_host,
-                "--server-port",
-                str(args.server_port),
-            ],
-            cwd=str(repo_root),
+        bridge_proc = _start_bridge(
+            pvpython=pvpython,
+            bridge_script=bridge_script,
+            bridge_host=args.bridge_host,
+            bridge_port=args.bridge_port,
+            server_host=args.server_host,
+            server_port=args.server_port,
+            repo_root=repo_root,
         )
         _wait_for_port(args.bridge_host, args.bridge_port, timeout=20, name="ParaView MCP bridge")
         print(f"ParaView MCP bridge ready on {args.bridge_host}:{args.bridge_port}", flush=True)
-        return gui_proc.wait()
+        return _wait_for_gui_with_bridge_supervision(
+            gui_proc=gui_proc,
+            bridge_proc=bridge_proc,
+            pvpython=pvpython,
+            bridge_script=bridge_script,
+            bridge_host=args.bridge_host,
+            bridge_port=args.bridge_port,
+            server_host=args.server_host,
+            server_port=args.server_port,
+            repo_root=repo_root,
+        )
     except KeyboardInterrupt:
         return 130
     finally:

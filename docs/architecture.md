@@ -56,6 +56,29 @@ Alternative headless script transport (no long-running bridge required):
 └────────────────────────┘
 ```
 
+### GUI and Qt ownership
+
+In the server-backed GUI launcher, the ParaView GUI and the bridge are two
+different client processes connected to the same `pvserver`:
+
+- `paraview-real` owns the visible Qt application, layouts, panels, and top-level
+  windows.
+- `pvpython` owns the MCP bridge process and the Python command handler.
+- `pvserver` owns the shared pipeline and server-side data objects.
+
+The default `pvpython` bridge is therefore not a GUI automation process. It may
+not have Qt bindings (`PySide6`, `PyQt5`, or `qtpy`) available, and it cannot
+reliably enumerate or close Qt widgets from the visible ParaView GUI. It can
+create and modify pipeline proxies and server-side views.
+
+This distinction matters for rendering commands. A script that calls
+`GetActiveViewOrCreate("RenderView")`, `Show()`, or `Render()` from the
+`pvpython` bridge can create a detached VTK render window if no GUI-bound render
+view is active in that bridge process. If that happens, cleanup should target the
+server-side `RenderView`/layout or the OS window manager; Qt widget cleanup is
+only available when using the in-GUI bridge started from ParaView's Python
+Shell.
+
 ---
 
 ## Components

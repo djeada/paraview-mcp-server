@@ -61,3 +61,37 @@ def test_launcher_strips_separator_from_paraview_args():
     assert "--data" in calls[1]
     assert "disk.vtu" in calls[1]
     assert "--" not in calls[1]
+
+
+def test_launcher_restarts_bridge_while_gui_is_running():
+    gui_proc = MagicMock()
+    gui_proc.wait.side_effect = [TimeoutError(), 0]
+
+    dead_bridge = MagicMock()
+    dead_bridge.poll.return_value = 9
+
+    restarted_bridge = MagicMock()
+    restarted_bridge.poll.return_value = None
+
+    with (
+        patch("paraview_mcp_server.launcher.subprocess.TimeoutExpired", TimeoutError),
+        patch("paraview_mcp_server.launcher._start_bridge", return_value=restarted_bridge) as start_bridge,
+        patch("paraview_mcp_server.launcher._wait_for_port") as wait_for_port,
+        patch("paraview_mcp_server.launcher._terminate") as terminate,
+    ):
+        result = launcher._wait_for_gui_with_bridge_supervision(
+            gui_proc=gui_proc,
+            bridge_proc=dead_bridge,
+            pvpython="pvpython",
+            bridge_script=Path("bridge.py"),
+            bridge_host="127.0.0.1",
+            bridge_port=9876,
+            server_host="127.0.0.1",
+            server_port=11111,
+            repo_root=Path.cwd(),
+        )
+
+    assert result == 0
+    start_bridge.assert_called_once()
+    wait_for_port.assert_called_once_with("127.0.0.1", 9876, timeout=20, name="ParaView MCP bridge")
+    terminate.assert_called_once_with(restarted_bridge)

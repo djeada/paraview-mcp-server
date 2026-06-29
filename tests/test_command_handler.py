@@ -26,8 +26,13 @@ def _make_pv_mock():
     fake_proxy.TimestepValues = [0.0, 1.0]
 
     pvs.GetSources.return_value = {("disk.ex2", 1): fake_proxy}
-    pvs.GetActiveViewOrCreate.return_value = MagicMock()
-    pvs.GetViews.return_value = [MagicMock()]
+    fake_view = MagicMock()
+    fake_view.GetXMLName.return_value = "RenderView"
+    fake_view.__class__.__name__ = "RenderView"
+    pvs.GetActiveView.return_value = fake_view
+    pvs.GetActiveViewOrCreate.return_value = fake_view
+    pvs.GetRenderViews.return_value = [fake_view]
+    pvs.GetViews.return_value = [fake_view]
     pvs.OpenDataFile.return_value = fake_proxy
     pvs.Show.return_value = None
     pvs.Hide.return_value = None
@@ -94,7 +99,7 @@ def _make_pv_mock():
     camera_state = {"parallel_scale": 1.0}
     camera_mock.GetParallelScale.side_effect = lambda: camera_state["parallel_scale"]
     camera_mock.SetParallelScale.side_effect = lambda value: camera_state.__setitem__("parallel_scale", value)
-    pvs.GetActiveViewOrCreate.return_value.GetActiveCamera.return_value = camera_mock
+    fake_view.GetActiveCamera.return_value = camera_mock
 
     return pvs
 
@@ -156,6 +161,7 @@ class TestSceneHandlers:
         result = h.handle("scene.get_info", {})
         assert "source_count" in result
         assert "active_view_type" in result
+        assert result["render_view_available"] is True
 
     def test_scene_list_sources(self, handler):
         h, pvs = handler
@@ -183,6 +189,16 @@ class TestSceneHandlers:
         with pytest.raises(ValueError, match="not found"):
             h.handle("source.get_properties", {"name": "missing.vtu"})
 
+    def test_scene_get_info_does_not_create_view_when_none_exists(self, handler):
+        h, pvs = handler
+        pvs.GetActiveView.return_value = None
+        pvs.GetRenderViews.return_value = []
+        pvs.GetViews.return_value = []
+        result = h.handle("scene.get_info", {})
+        assert result["active_view_type"] is None
+        assert result["render_view_available"] is False
+        pvs.GetActiveViewOrCreate.assert_not_called()
+
 
 class TestDataLoadingHandlers:
     def test_source_open_file(self, handler):
@@ -191,8 +207,20 @@ class TestDataLoadingHandlers:
         assert result["name"] == "disk.ex2"
         assert result["label"] == "DiskOut"
         assert result["filepath"] == "/data/disk.ex2"
+        assert result["shown"] is True
         pvs.OpenDataFile.assert_called_once_with("/data/disk.ex2")
         pvs.Show.assert_called()
+
+    def test_source_open_file_does_not_create_view_when_none_exists(self, handler):
+        h, pvs = handler
+        pvs.GetActiveView.return_value = None
+        pvs.GetRenderViews.return_value = []
+        pvs.GetViews.return_value = []
+        result = h.handle("source.open_file", {"filepath": "/data/disk.ex2"})
+        assert result["shown"] is False
+        pvs.OpenDataFile.assert_called_once_with("/data/disk.ex2")
+        pvs.Show.assert_not_called()
+        pvs.GetActiveViewOrCreate.assert_not_called()
 
     def test_source_open_file_returns_none_raises(self, handler):
         h, pvs = handler
@@ -218,6 +246,26 @@ class TestDisplayHandlers:
         h, pvs = handler
         result = h.handle("display.show", {"name": "disk.ex2"})
         assert result["shown"] == "disk.ex2"
+        pvs.Show.assert_called()
+
+    def test_display_show_refuses_to_create_detached_view(self, handler):
+        h, pvs = handler
+        pvs.GetActiveView.return_value = None
+        pvs.GetRenderViews.return_value = []
+        pvs.GetViews.return_value = []
+        with pytest.raises(RuntimeError, match="Refusing to create one from pvpython"):
+            h.handle("display.show", {"name": "disk.ex2"})
+        pvs.GetActiveViewOrCreate.assert_not_called()
+
+    def test_display_show_can_create_view_when_explicitly_allowed(self, handler, monkeypatch):
+        h, pvs = handler
+        pvs.GetActiveView.return_value = None
+        pvs.GetRenderViews.return_value = []
+        pvs.GetViews.return_value = []
+        monkeypatch.setenv("PARAVIEW_MCP_ALLOW_VIEW_CREATE", "1")
+        result = h.handle("display.show", {"name": "disk.ex2"})
+        assert result["shown"] == "disk.ex2"
+        pvs.GetActiveViewOrCreate.assert_called_once_with("RenderView")
         pvs.Show.assert_called()
 
     def test_display_hide(self, handler):

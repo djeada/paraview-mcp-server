@@ -44,8 +44,7 @@ class ParaViewConnection:
     async def disconnect(self):
         await self._drop_connection()
 
-    async def send_command(self, command: str, params: dict | None = None) -> Any:
-        """Send a command to the ParaView bridge and return the result."""
+    async def _send_command_once(self, command: str, params: dict | None = None) -> Any:
         if not self._writer:
             await self.connect()
 
@@ -84,6 +83,29 @@ class ParaViewConnection:
                 if isinstance(e, json.JSONDecodeError):
                     raise ConnectionError("Lost connection to ParaView bridge: invalid JSON response") from e
                 raise ConnectionError(f"Lost connection to ParaView bridge: {e}") from e
+
+    async def send_command(self, command: str, params: dict | None = None) -> Any:
+        """Send a command to the ParaView bridge and return the result.
+
+        A bridge-side process can be restarted while the MCP server keeps an old
+        socket. Retry one time on transport failures so the next tool call can
+        recover without forcing the MCP server process to restart.
+        """
+        last_error: ConnectionError | OSError | None = None
+        for attempt in range(2):
+            try:
+                return await self._send_command_once(command, params)
+            except (ConnectionError, OSError) as exc:
+                last_error = exc
+                if attempt == 0:
+                    logger.info("Retrying ParaView bridge command after reconnect: %s", command)
+                    continue
+                if isinstance(exc, OSError):
+                    raise ConnectionError(
+                        f"Could not connect to ParaView bridge at {self.host}:{self.port}: {exc}"
+                    ) from exc
+                raise
+        raise ConnectionError(f"Could not connect to ParaView bridge at {self.host}:{self.port}: {last_error}")
 
 
 @asynccontextmanager

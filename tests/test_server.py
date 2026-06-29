@@ -190,6 +190,7 @@ class TestParaViewConnection:
     @pytest.mark.asyncio
     async def test_send_command_connection_closed(self):
         conn = ParaViewConnection()
+        response = {"id": "retry-id", "success": True, "result": {"source_count": 3}}
 
         mock_reader = AsyncMock()
         mock_reader.readline = AsyncMock(return_value=b"")
@@ -202,12 +203,29 @@ class TestParaViewConnection:
         conn._reader = mock_reader
         conn._writer = mock_writer
 
-        with pytest.raises(ConnectionError):
-            await conn.send_command("scene.get_info")
+        retry_reader = AsyncMock()
+        retry_reader.readline = AsyncMock(return_value=json.dumps(response).encode() + b"\n")
+        retry_writer = AsyncMock()
+        retry_writer.write = MagicMock()
+        retry_writer.drain = AsyncMock()
+        retry_writer.close = MagicMock()
+        retry_writer.wait_closed = AsyncMock()
+
+        with (
+            patch("asyncio.open_connection", return_value=(retry_reader, retry_writer)),
+            patch("paraview_mcp_server.server.uuid.uuid4", side_effect=["closed-id", "retry-id"]),
+        ):
+            result = await conn.send_command("scene.get_info")
+
+        assert result == {"source_count": 3}
+        mock_writer.close.assert_called_once()
+        mock_writer.wait_closed.assert_awaited_once()
+        retry_writer.write.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_send_command_response_id_mismatch_resets_connection(self):
         conn = ParaViewConnection()
+        response = {"id": "retry-id", "success": True, "result": {"ok": True}}
 
         mock_reader = AsyncMock()
         mock_reader.readline = AsyncMock(
@@ -222,13 +240,24 @@ class TestParaViewConnection:
         conn._reader = mock_reader
         conn._writer = mock_writer
 
-        with pytest.raises(ConnectionError, match="mismatched response id"):
-            await conn.send_command("scene.get_info")
+        retry_reader = AsyncMock()
+        retry_reader.readline = AsyncMock(return_value=json.dumps(response).encode() + b"\n")
+        retry_writer = AsyncMock()
+        retry_writer.write = MagicMock()
+        retry_writer.drain = AsyncMock()
+        retry_writer.close = MagicMock()
+        retry_writer.wait_closed = AsyncMock()
 
-        assert conn._reader is None
-        assert conn._writer is None
+        with (
+            patch("asyncio.open_connection", return_value=(retry_reader, retry_writer)),
+            patch("paraview_mcp_server.server.uuid.uuid4", side_effect=["test-id", "retry-id"]),
+        ):
+            result = await conn.send_command("scene.get_info")
+
+        assert result == {"ok": True}
         mock_writer.close.assert_called_once()
         mock_writer.wait_closed.assert_awaited_once()
+        retry_writer.write.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_connect_failure(self):

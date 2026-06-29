@@ -156,6 +156,37 @@ ParaView bridge ready on 127.0.0.1:9876
 Keep that terminal running. This controls the `pvpython` session, not a GUI
 window opened separately.
 
+### GUI/Qt Limitations
+
+The default live bridge runs in a separate `pvpython` process connected to the
+same `pvserver` session as the ParaView GUI. It is not running inside the GUI's
+Qt event loop. In that mode, the bridge can modify the ParaView pipeline and
+server-side views, but it cannot reliably inspect or manage GUI top-level
+widgets because Qt bindings such as `PySide6`, `PyQt5`, or `qtpy` may not be
+available in the bridge runtime.
+
+Practical consequences:
+
+- `GetActiveViewOrCreate("RenderView")`, `Show()`, or `Render()` can create a
+  detached VTK render window instead of reusing the visible GUI layout.
+- The bridge may see a `RenderView` even though the user is looking at a
+  different GUI panel.
+- If a detached VTK window is created, the bridge usually cannot close it via
+  Qt APIs. Use the window manager or delete the server-side view/layout.
+
+For GUI-window automation, start the experimental in-GUI bridge from ParaView's
+Python Shell:
+
+```bash
+scripts/start_paraview_gui_bridge.py
+```
+
+For pipeline automation from the default bridge, prefer creating/updating
+sources and filters first. Only call `Show()`/`Render()` after confirming a
+usable render view exists, and prefer `Outline`, `Slice`, `Glyph`, and
+`StreamTracer` filters over displaying large simulation volumes as opaque
+surfaces.
+
 ### Verify the Bridge Directly
 
 Before involving an MCP client, send one raw bridge command:
@@ -388,6 +419,28 @@ For long-running pipelines, use `paraview_python_exec_async`:
 3. Cancel with `paraview_job_cancel` if needed
 
 Async jobs run in a separate headless `pvpython` process via `HeadlessPvpythonExecutor`.
+
+---
+
+## Troubleshooting
+
+### ParaView is connected, but MCP cannot close or inspect a window
+
+If the Pipeline Browser shows `cs://127.0.0.1:11111`, the ParaView GUI is
+connected to `pvserver`. That does not mean the MCP TCP bridge is running or
+that MCP has access to GUI Qt widgets. Verify the bridge separately:
+
+```bash
+python scripts/paraview_bridge_request.py scene.get_info
+```
+
+If a second VTK render window appears and refuses to close, it was likely
+created by the `pvpython` bridge through `GetActiveViewOrCreate("RenderView")`
+or a display/render command. The bridge normally cannot close this via Qt
+because the default runtime is not the GUI process and often has no Qt Python
+bindings. Delete the server-side view/layout, use the window manager, or restart
+the ParaView-side bridge. For workflows that must control GUI windows directly,
+use the in-GUI bridge from ParaView's Python Shell.
 
 ---
 

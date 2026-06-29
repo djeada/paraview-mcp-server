@@ -173,17 +173,81 @@ class CommandHandler:
         except Exception:
             return hasattr(proxy, name)
 
+    @staticmethod
+    def _is_render_view(view: Any) -> bool:
+        if view is None:
+            return False
+        get_xml_name = getattr(view, "GetXMLName", None)
+        if callable(get_xml_name):
+            try:
+                return bool(get_xml_name() == "RenderView")
+            except Exception:
+                pass
+        return type(view).__name__ == "RenderView"
+
+    def _find_render_view(self, pvs: Any) -> Any | None:
+        """Return an existing render view without creating a detached VTK window."""
+        get_active_view = getattr(pvs, "GetActiveView", None)
+        if callable(get_active_view):
+            view = get_active_view()
+            if self._is_render_view(view):
+                return view
+
+        get_render_views = getattr(pvs, "GetRenderViews", None)
+        if callable(get_render_views):
+            for view in get_render_views():
+                if self._is_render_view(view):
+                    return view
+
+        get_views = getattr(pvs, "GetViews", None)
+        if callable(get_views):
+            for view in get_views():
+                if self._is_render_view(view):
+                    return view
+        return None
+
+    def _get_render_view(self, pvs: Any, *, required: bool = True) -> Any | None:
+        view = self._find_render_view(pvs)
+        if view is not None:
+            return view
+
+        if os.environ.get("PARAVIEW_MCP_GUI_BRIDGE") == "1" or os.environ.get("PARAVIEW_MCP_ALLOW_VIEW_CREATE") == "1":
+            return pvs.GetActiveViewOrCreate("RenderView")
+
+        if required:
+            raise RuntimeError(
+                "No existing RenderView is available to the ParaView MCP bridge. "
+                "Refusing to create one from pvpython because that can open a detached VTK window. "
+                "Create a view in the ParaView GUI, start the in-GUI bridge, or set "
+                "PARAVIEW_MCP_ALLOW_VIEW_CREATE=1 to opt in."
+            )
+        return None
+
+    def _require_render_view(self, pvs: Any) -> Any:
+        view = self._get_render_view(pvs)
+        if view is None:
+            raise RuntimeError("No RenderView is available")
+        return view
+
+    def _show_if_render_view(self, pvs: Any, proxy: Any) -> bool:
+        view = self._get_render_view(pvs, required=False)
+        if view is None:
+            return False
+        pvs.Show(proxy, view)
+        return True
+
     # ------------------------------------------------------------------
     # Scene / session handlers
     # ------------------------------------------------------------------
 
     def _scene_get_info(self, params: dict) -> dict:
         pvs = self._import_pv()
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._get_render_view(pvs, required=False)
         sources = pvs.GetSources()
         return {
             "source_count": len(sources),
-            "active_view_type": type(view).__name__,
+            "active_view_type": type(view).__name__ if view is not None else None,
+            "render_view_available": view is not None,
         }
 
     def _scene_list_sources(self, params: dict) -> dict:
@@ -234,9 +298,12 @@ class CommandHandler:
         src = pvs.OpenDataFile(filepath)
         if src is None:
             raise RuntimeError(f"ParaView could not open file: {filepath!r}")
-        view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.Show(src, view)
-        pvs.ResetCamera(view)
+        view = self._get_render_view(pvs, required=False)
+        shown = False
+        if view is not None:
+            pvs.Show(src, view)
+            pvs.ResetCamera(view)
+            shown = True
         name = self._get_source_name(src)
         label = src.GetXMLLabel() if hasattr(src, "GetXMLLabel") else type(src).__name__
         return {
@@ -244,6 +311,7 @@ class CommandHandler:
             "label": label,
             "filepath": filepath,
             "proxy_class": type(src).__name__,
+            "shown": shown,
         }
 
     def _source_delete(self, params: dict) -> dict:
@@ -265,21 +333,21 @@ class CommandHandler:
     def _display_show(self, params: dict) -> dict:
         pvs = self._import_pv()
         src = self._find_source(params["name"])
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         pvs.Show(src, view)
         return {"shown": params["name"]}
 
     def _display_hide(self, params: dict) -> dict:
         pvs = self._import_pv()
         src = self._find_source(params["name"])
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         pvs.Hide(src, view)
         return {"hidden": params["name"]}
 
     def _display_color_by(self, params: dict) -> dict:
         pvs = self._import_pv()
         src = self._find_source(params["name"])
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         display = pvs.GetDisplayProperties(src, view)
         array = params["array"]
         component = int(params.get("component", -1))
@@ -302,7 +370,7 @@ class CommandHandler:
     def _display_set_representation(self, params: dict) -> dict:
         pvs = self._import_pv()
         src = self._find_source(params["name"])
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         display = pvs.GetDisplayProperties(src, view)
         display.Representation = params["representation"]
         return {"name": params["name"], "representation": params["representation"]}
@@ -310,7 +378,7 @@ class CommandHandler:
     def _display_set_opacity(self, params: dict) -> dict:
         pvs = self._import_pv()
         src = self._find_source(params["name"])
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         display = pvs.GetDisplayProperties(src, view)
         opacity = float(params["opacity"])
         display.Opacity = opacity
@@ -319,7 +387,7 @@ class CommandHandler:
     def _display_rescale_transfer_function(self, params: dict) -> dict:
         pvs = self._import_pv()
         src = self._find_source(params["name"])
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         display = pvs.GetDisplayProperties(src, view)
         display.RescaleTransferFunctionToDataRange(False)
         pvs.UpdateScalarBars(view)
@@ -331,13 +399,13 @@ class CommandHandler:
 
     def _view_reset_camera(self, params: dict) -> dict:
         pvs = self._import_pv()
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         pvs.ResetCamera(view)
         return {"reset": True}
 
     def _view_set_camera(self, params: dict) -> dict:
         pvs = self._import_pv()
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         camera = view.GetActiveCamera()
         if "position" in params:
             camera.SetPosition(*params["position"])
@@ -362,7 +430,7 @@ class CommandHandler:
 
     def _view_set_background(self, params: dict) -> dict:
         pvs = self._import_pv()
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         color = params["color"]
         view.Background = color
         result = {"color": color, "gradient": "color2" in params}
@@ -390,7 +458,7 @@ class CommandHandler:
         width = int(params.get("width", 1920))
         height = int(params.get("height", 1080))
         transparent = bool(params.get("transparent", False))
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         pvs.SaveScreenshot(filepath, view, ImageResolution=[width, height], TransparentBackground=int(transparent))
         return {
             "filepath": filepath,
@@ -413,7 +481,7 @@ class CommandHandler:
         frame_rate = int(params.get("frame_rate", 15))
         frame_start = params.get("frame_start")
         frame_end = params.get("frame_end")
-        view = pvs.GetActiveViewOrCreate("RenderView")
+        view = self._require_render_view(pvs)
         save_kwargs: dict[str, Any] = {
             "ImageResolution": [width, height],
             "FrameRate": frame_rate,
@@ -443,9 +511,8 @@ class CommandHandler:
         filt = pvs.Slice(Input=src)
         filt.SliceType.Origin = origin
         filt.SliceType.Normal = normal
-        view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.Show(filt, view)
-        return {"input": params["input"], "filter": "Slice", "origin": origin, "normal": normal}
+        shown = self._show_if_render_view(pvs, filt)
+        return {"input": params["input"], "filter": "Slice", "origin": origin, "normal": normal, "shown": shown}
 
     def _filter_clip(self, params: dict) -> dict:
         pvs = self._import_pv()
@@ -455,9 +522,8 @@ class CommandHandler:
         filt = pvs.Clip(Input=src)
         filt.ClipType.Origin = origin
         filt.ClipType.Normal = normal
-        view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.Show(filt, view)
-        return {"input": params["input"], "filter": "Clip", "origin": origin, "normal": normal}
+        shown = self._show_if_render_view(pvs, filt)
+        return {"input": params["input"], "filter": "Clip", "origin": origin, "normal": normal, "shown": shown}
 
     def _filter_contour(self, params: dict) -> dict:
         pvs = self._import_pv()
@@ -467,9 +533,8 @@ class CommandHandler:
         filt = pvs.Contour(Input=src)
         filt.ContourBy = ["POINTS", array]
         filt.Isosurfaces = values
-        view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.Show(filt, view)
-        return {"input": params["input"], "filter": "Contour", "array": array, "values": values}
+        shown = self._show_if_render_view(pvs, filt)
+        return {"input": params["input"], "filter": "Contour", "array": array, "values": values, "shown": shown}
 
     def _filter_threshold(self, params: dict) -> dict:
         pvs = self._import_pv()
@@ -486,14 +551,14 @@ class CommandHandler:
             filt.UpperThreshold = upper
             if self._proxy_has_property(filt, "ThresholdMethod"):
                 filt.ThresholdMethod = "Between"
-        view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.Show(filt, view)
+        shown = self._show_if_render_view(pvs, filt)
         return {
             "input": params["input"],
             "filter": "Threshold",
             "array": array,
             "lower": lower,
             "upper": upper,
+            "shown": shown,
         }
 
     # ------------------------------------------------------------------
@@ -510,13 +575,13 @@ class CommandHandler:
         filt.Function = expression
         filt.ResultArrayName = result_name
         filt.AttributeType = attribute_type
-        view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.Show(filt, view)
+        shown = self._show_if_render_view(pvs, filt)
         return {
             "input": params["input"],
             "filter": "Calculator",
             "expression": expression,
             "result_name": result_name,
+            "shown": shown,
         }
 
     def _filter_stream_tracer(self, params: dict) -> dict:
@@ -531,8 +596,7 @@ class CommandHandler:
         filt.MaximumStreamlineLength = max_length
         if hasattr(filt, "SeedType") and hasattr(filt.SeedType, "NumberOfPoints"):
             filt.SeedType.NumberOfPoints = num_points
-        view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.Show(filt, view)
+        shown = self._show_if_render_view(pvs, filt)
         return {
             "input": params["input"],
             "filter": "StreamTracer",
@@ -540,6 +604,7 @@ class CommandHandler:
             "integration_direction": integration_direction,
             "num_points": num_points,
             "max_length": max_length,
+            "shown": shown,
         }
 
     def _filter_glyph(self, params: dict) -> dict:
@@ -552,13 +617,13 @@ class CommandHandler:
         filt.ScaleFactor = scale_factor
         if scale_array:
             filt.ScaleArray = ["POINTS", scale_array]
-        view = pvs.GetActiveViewOrCreate("RenderView")
-        pvs.Show(filt, view)
+        shown = self._show_if_render_view(pvs, filt)
         return {
             "input": params["input"],
             "filter": "Glyph",
             "glyph_type": glyph_type,
             "scale_factor": scale_factor,
+            "shown": shown,
         }
 
     # ------------------------------------------------------------------

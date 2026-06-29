@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-06-29
+
+### Added
+- Documented default bridge GUI/Qt limitations and detached VTK render-window troubleshooting.
+- Added launcher supervision that restarts the ParaView-side bridge if it exits while the GUI is still running.
+
+### Fixed
+- Retried stale MCP bridge TCP connections once before surfacing transport failures.
+- Prevented default `pvpython` bridge commands from creating detached `RenderView` windows unless explicitly allowed.
+- Allowed pipeline-only source/filter creation without forcing a render view; responses now report whether new objects were shown.
+
+## [0.1.4] — 2026-06-27
+
 ### Added
 - CI pipeline (`ci.yml`): ruff lint, ruff format, mypy, pytest with coverage across Python 3.10–3.13.
 - PyPI publish workflow (`publish-pypi.yml`): OIDC-based publishing gated on CI, triggered by version tags, releases, or manual dispatch.
@@ -42,5 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Unit tests: 85 tests covering bridge handlers, TCP protocol, MCP server
   tools, headless executor, and async job lifecycle.
 
-[Unreleased]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/djeada/paraview-mcp-server/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/djeada/paraview-mcp-server/releases/tag/v0.1.4
 [0.1.0]: https://github.com/djeada/paraview-mcp-server/releases/tag/v0.1.0
