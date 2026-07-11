@@ -13,7 +13,7 @@ The command installed for MCP clients is still:
 paraview-mcp-server
 ```
 
----
+<img width="1280" height="720" alt="maxresdefault" src="https://github.com/user-attachments/assets/6e21f408-72b6-4523-a527-55b283b9e274" />
 
 ## What Parts Are There?
 
