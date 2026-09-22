@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.2.0] — 2026-09-22
 
+### Fixed (dependencies)
+- Pinned `mcp<2`. The dependency was previously unbounded, so a fresh install
+  picked up mcp 2.x, in which `FastMCP` was renamed to `MCPServer` and moved
+  out of `mcp.server.fastmcp` — the server failed to import at all. Supporting
+  mcp 2.x is tracked separately.
+
 ### Security
 - The bridge now authenticates every request against a random token written at
   startup to a `0600` file in a private runtime directory. Previously any local

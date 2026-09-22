@@ -27,7 +27,10 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # Upper bound is deliberate. mcp 2.x renamed FastMCP to MCPServer and moved
+    # it out of mcp.server.fastmcp, along with other API changes, so this code
+    # does not import under 2.x. Supporting it is a separate piece of work.
+    "mcp>=1.0.0,<2",
 ]
 
 [project.urls]
