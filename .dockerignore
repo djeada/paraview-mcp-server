@@ -13,7 +13,6 @@ htmlcov
 coverage.xml
 .coverage
 docs
-scripts
 tests
 *.md
 !README.md

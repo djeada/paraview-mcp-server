@@ -13,9 +13,15 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from bridge.server import BUFFER_SIZE, HOST, PORT
+from paraview_mcp_bridge import runtime
+from paraview_mcp_bridge.server import BUFFER_SIZE, HOST, MAX_REQUEST_BYTES, PORT, warn_if_not_loopback
 
 logger = logging.getLogger(__name__)
+
+# Requests handled per GUI timer tick. Draining the whole backlog in one tick
+# would stall ParaView's event loop; leaving the backlog untouched would strand
+# it (see poll()), so the budget is a compromise.
+MAX_REQUESTS_PER_POLL = 8
 
 
 @dataclass
@@ -27,9 +33,10 @@ class _ClientState:
 class ParaViewGuiBridgeServer:
     """Nonblocking TCP bridge polled from ParaView's GUI event loop."""
 
-    def __init__(self, host: str = HOST, port: int = PORT, poll_interval_ms: int = 50):
+    def __init__(self, host: str = HOST, port: int = PORT, poll_interval_ms: int = 50, *, token: str | None = None):
         self._host = host
         self._port = port
+        self._token = token
         self._poll_interval_ms = poll_interval_ms
         self._server_socket: socket.socket | None = None
         self._clients: dict[socket.socket, _ClientState] = {}
@@ -38,7 +45,7 @@ class ParaViewGuiBridgeServer:
         self._observer_id: int | None = None
         self._timer_id: int | None = None
         # Import here so this module can be imported without ParaView installed.
-        from bridge.command_handler import CommandHandler
+        from paraview_mcp_bridge.command_handler import CommandHandler
 
         self._handler = CommandHandler()
 
@@ -54,9 +61,16 @@ class ParaViewGuiBridgeServer:
     def is_running(self) -> bool:
         return self._running
 
+    @property
+    def token(self) -> str | None:
+        return self._token
+
     def start(self) -> None:
         if self._running:
             return
+        if self._token is None and not runtime.auth_disabled():
+            self._token = runtime.create_token()
+        warn_if_not_loopback(self._host)
         self._interactor = self._get_render_window_interactor()
         if not callable(getattr(self._interactor, "AddObserver", None)):
             raise RuntimeError("ParaView render window interactor does not support VTK observers")
@@ -123,10 +137,10 @@ class ParaViewGuiBridgeServer:
         for sock in readable:
             if sock is self._server_socket:
                 self._accept_ready_clients()
-                return
             else:
-                if self._read_client(sock):
-                    return
+                self._receive_into_buffer(sock)
+
+        self._process_buffered_requests()
 
     def _accept_ready_clients(self) -> None:
         if self._server_socket is None:
@@ -142,34 +156,65 @@ class ParaViewGuiBridgeServer:
             self._clients[conn] = _ClientState(conn)
             logger.info("Client connected from %s", addr)
 
-    def _read_client(self, sock: socket.socket) -> bool:
+    def _receive_into_buffer(self, sock: socket.socket) -> None:
+        """Move readable bytes into the client's buffer without handling them."""
         state = self._clients.get(sock)
         if state is None:
-            return False
+            return
         try:
             data = sock.recv(BUFFER_SIZE)
         except BlockingIOError:
-            return False
+            return
         except OSError:
             self._close_client(sock)
-            return False
+            return
         if not data:
             self._close_client(sock)
-            return False
+            return
 
         state.buffer += data
-        while b"\n" in state.buffer:
-            line, state.buffer = state.buffer.split(b"\n", 1)
-            if not line.strip():
-                continue
-            try:
-                request = json.loads(line.decode("utf-8"))
-                response = self._process_request(request)
-            except Exception as exc:
-                response = {"id": None, "success": False, "error": str(exc)}
-            self._send_response(sock, response)
-            return True
-        return False
+        if b"\n" not in state.buffer and len(state.buffer) > MAX_REQUEST_BYTES:
+            logger.warning("Dropping client: request exceeded %d bytes without a newline", MAX_REQUEST_BYTES)
+            self._send_response(
+                sock,
+                {
+                    "id": None,
+                    "success": False,
+                    "error": f"Request exceeded {MAX_REQUEST_BYTES} bytes without a newline",
+                },
+            )
+            self._close_client(sock)
+
+    def _process_buffered_requests(self) -> None:
+        """Handle complete requests already sitting in client buffers.
+
+        select() only reports *kernel* readability, so anything already copied
+        into a client buffer is invisible to it. Requests that arrived in the
+        same read as an earlier one must therefore be drained from here, or a
+        client that pipelines two requests never gets a second response.
+        """
+        budget = MAX_REQUESTS_PER_POLL
+        for sock in list(self._clients):
+            while budget > 0:
+                state = self._clients.get(sock)
+                if state is None or b"\n" not in state.buffer:
+                    break
+                line, state.buffer = state.buffer.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                budget -= 1
+                try:
+                    request = json.loads(line.decode("utf-8"))
+                    response = self._process_request(request)
+                except Exception as exc:
+                    response = {"id": None, "success": False, "error": str(exc)}
+                self._send_response(sock, response)
+            if budget <= 0:
+                break
+
+    def has_pending_requests(self) -> bool:
+        """Whether any client buffer still holds an unhandled request."""
+        return any(b"\n" in state.buffer for state in self._clients.values())
 
     def _send_response(self, sock: socket.socket, response: dict[str, Any]) -> None:
         try:
@@ -189,6 +234,17 @@ class ParaViewGuiBridgeServer:
         req_id = request.get("id", str(uuid.uuid4()))
         command = request.get("command")
         params = request.get("params", {})
+        if not runtime.tokens_match(self._token, request.get("token")):
+            logger.warning("Rejected GUI bridge request with a missing or invalid token")
+            return {
+                "id": req_id,
+                "success": False,
+                "error": (
+                    "Missing or invalid bridge token. Read it from "
+                    f"{runtime.token_file_path()} or set {runtime.DISABLE_AUTH_ENV}=1 on the bridge "
+                    "to turn authentication off."
+                ),
+            }
         if not isinstance(command, str) or not command.strip():
             return {"id": req_id, "success": False, "error": "Missing or invalid command"}
         if not isinstance(params, dict):
@@ -231,6 +287,7 @@ def start_gui_bridge(host: str = HOST, port: int = PORT) -> dict[str, Any]:
             "port": _SERVER.port,
             "running": True,
             "already_running": True,
+            "token_file": str(runtime.token_file_path()) if _SERVER.token else None,
         }
 
     server = ParaViewGuiBridgeServer(host=host, port=port)
@@ -241,6 +298,7 @@ def start_gui_bridge(host: str = HOST, port: int = PORT) -> dict[str, Any]:
         "port": server.port,
         "running": True,
         "already_running": False,
+        "token_file": str(runtime.token_file_path()) if server.token else None,
     }
 
 

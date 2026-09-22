@@ -8,6 +8,8 @@ import threading
 import traceback
 import uuid
 
+from paraview_mcp_bridge import runtime
+
 logger = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
@@ -15,11 +17,31 @@ PORT = 9876
 BUFFER_SIZE = 65536
 CLIENT_SOCKET_TIMEOUT = 1.0
 
+# A request is one JSON line. Without a ceiling a peer that never sends a
+# newline grows the receive buffer until the process dies.
+MAX_REQUEST_BYTES = 8 * 1024 * 1024
+
+
+class RequestTooLargeError(Exception):
+    """Raised when a client exceeds :data:`MAX_REQUEST_BYTES` without a newline."""
+
+
+def warn_if_not_loopback(host: str) -> None:
+    """Log loudly when the bridge is about to accept non-local connections."""
+    if runtime.is_loopback(host):
+        return
+    logger.warning(
+        "ParaView bridge is binding to %s, which is not a loopback address. "
+        "The bridge executes arbitrary Python inside ParaView; exposing it beyond "
+        "localhost gives anyone who can reach this port control of this session.",
+        host,
+    )
+
 
 class ParaViewBridgeServer:
     """TCP server that receives JSON commands and dispatches them to a CommandHandler."""
 
-    def __init__(self, host: str = HOST, port: int = PORT):
+    def __init__(self, host: str = HOST, port: int = PORT, *, token: str | None = None):
         self._host = host
         self._port = port
         self._server_socket: socket.socket | None = None
@@ -27,8 +49,9 @@ class ParaViewBridgeServer:
         self._running = False
         self._client_sockets: set[socket.socket] = set()
         self._client_sockets_lock = threading.Lock()
+        self._token = token
         # Import here so the bridge module can be imported without paraview installed.
-        from bridge.command_handler import CommandHandler
+        from paraview_mcp_bridge.command_handler import CommandHandler
 
         self._handler = CommandHandler()
         self._handler_lock = threading.Lock()
@@ -45,9 +68,16 @@ class ParaViewBridgeServer:
     def is_running(self) -> bool:
         return self._running
 
+    @property
+    def token(self) -> str | None:
+        return self._token
+
     def start(self):
         if self._running:
             return
+        if self._token is None and not runtime.auth_disabled():
+            self._token = runtime.create_token()
+        warn_if_not_loopback(self._host)
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_socket.settimeout(1.0)
@@ -90,6 +120,10 @@ class ParaViewBridgeServer:
             except TimeoutError:
                 continue
             except OSError:
+                # The listening socket is gone; nothing can be accepted again.
+                if self._running:
+                    logger.error("ParaView bridge accept loop stopped unexpectedly")
+                    self._running = False
                 break
 
     def _register_client_socket(self, conn: socket.socket):
@@ -113,6 +147,20 @@ class ParaViewBridgeServer:
                 if not data:
                     break
                 buffer += data
+                if b"\n" not in buffer and len(buffer) > MAX_REQUEST_BYTES:
+                    logger.warning("Dropping client: request exceeded %d bytes without a newline", MAX_REQUEST_BYTES)
+                    with contextlib.suppress(OSError):
+                        conn.sendall(
+                            json.dumps(
+                                {
+                                    "id": None,
+                                    "success": False,
+                                    "error": f"Request exceeded {MAX_REQUEST_BYTES} bytes without a newline",
+                                }
+                            ).encode("utf-8")
+                            + b"\n"
+                        )
+                    break
                 while b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)
                     if not line.strip():
@@ -129,7 +177,7 @@ class ParaViewBridgeServer:
                     try:
                         conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
                     except OSError:
-                        break
+                        return
         finally:
             self._unregister_client_socket(conn)
             with contextlib.suppress(OSError):
@@ -142,6 +190,17 @@ class ParaViewBridgeServer:
         req_id = request.get("id", str(uuid.uuid4()))
         command = request.get("command")
         params = request.get("params", {})
+        if not runtime.tokens_match(self._token, request.get("token")):
+            logger.warning("Rejected bridge request with a missing or invalid token")
+            return {
+                "id": req_id,
+                "success": False,
+                "error": (
+                    "Missing or invalid bridge token. Read it from "
+                    f"{runtime.token_file_path()} or set {runtime.DISABLE_AUTH_ENV}=1 on the bridge "
+                    "to turn authentication off."
+                ),
+            }
         if not isinstance(command, str) or not command.strip():
             return {"id": req_id, "success": False, "error": "Missing or invalid command"}
         if not isinstance(params, dict):

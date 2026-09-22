@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "paraview-mcp-python"
-version = "0.1.7"
+dynamic = ["version"]
 description = "MCP server for controlling ParaView via AI assistants"
 readme = "README.md"
 license = "MIT"
@@ -28,7 +28,6 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=1.0.0",
-    "pydantic>=2.0",
 ]
 
 [project.urls]
@@ -45,13 +44,24 @@ dev = [
     "mypy>=1.15",
 ]
 
+[tool.hatch.version]
+path = "src/paraview_mcp_server/__init__.py"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/paraview_mcp_server", "bridge"]
+packages = ["src/paraview_mcp_server", "src/paraview_mcp_bridge"]
+
+# The bridge entry points must be reachable from a pip install, because the
+# launcher hands them to pvpython. pvpython does not share this interpreter's
+# site-packages, so the launcher also injects PYTHONPATH when it spawns them.
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/start_paraview_bridge.py" = "paraview_mcp_server/_scripts/start_paraview_bridge.py"
+"scripts/start_paraview_gui_bridge.py" = "paraview_mcp_server/_scripts/start_paraview_gui_bridge.py"
+"scripts/paraview_bridge_request.py" = "paraview_mcp_server/_scripts/paraview_bridge_request.py"
+"scripts/library" = "paraview_mcp_server/_scripts/library"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "src/",
-    "bridge/",
     "docs/",
     "scripts/",
     "tests/",
@@ -66,10 +76,9 @@ paraview-mcp-launch = "paraview_mcp_server.launcher:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
-addopts = "--cov=paraview_mcp_server --cov=bridge --cov-report=term-missing --cov-report=xml:coverage.xml"
 
 [tool.coverage.run]
-source = ["src/paraview_mcp_server", "bridge"]
+source = ["src/paraview_mcp_server", "src/paraview_mcp_bridge"]
 
 [tool.coverage.report]
 fail_under = 50
@@ -105,7 +114,7 @@ ignore = [
 "scripts/library/*.py" = ["F821"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["paraview_mcp_server"]
+known-first-party = ["paraview_mcp_server", "paraview_mcp_bridge"]
 
 [tool.mypy]
 python_version = "3.10"

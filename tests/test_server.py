@@ -2,12 +2,16 @@
 
 import asyncio
 import json
+import signal
 import sys
+import time
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from paraview_mcp_server.headless import HeadlessPvpythonExecutor
+from paraview_mcp_server import headless as headless_module
+from paraview_mcp_server.headless import HeadlessJobManager, HeadlessPvpythonExecutor
 from paraview_mcp_server.server import (
     HEADLESS_JOB_MANAGER,
     ParaViewConnection,
@@ -459,6 +463,41 @@ class TestMCPToolFunctions:
         conn.send_command.assert_awaited_once_with("python.execute", {"code": "__result__ = {'ok': True}"})
 
 
+class _FakeStream:
+    """Minimal asyncio.StreamReader stand-in that yields bytes then EOF."""
+
+    def __init__(self, data: bytes, chunk_size: int = 4096):
+        self._data = data
+        self._chunk_size = chunk_size
+
+    async def read(self, size: int = -1) -> bytes:
+        if not self._data:
+            return b""
+        take = self._chunk_size if size is None or size < 0 else min(size, self._chunk_size)
+        chunk, self._data = self._data[:take], self._data[take:]
+        return chunk
+
+
+def _fake_proc(stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0, wait_forever: bool = False):
+    proc = MagicMock()
+    proc.stdout = _FakeStream(stdout)
+    proc.stderr = _FakeStream(stderr)
+    # A process that never exits has no returncode yet; _signal_tree relies on
+    # that to know whether there is still anything to signal.
+    proc.returncode = None if wait_forever else returncode
+    proc.pid = 424242
+
+    async def _wait():
+        if wait_forever:
+            await asyncio.Event().wait()
+        return returncode
+
+    proc.wait = _wait
+    proc.kill = MagicMock()
+    proc.terminate = MagicMock()
+    return proc
+
+
 class TestHeadlessExecutor:
     """Test the headless pvpython executor."""
 
@@ -474,14 +513,7 @@ class TestHeadlessExecutor:
             "cancelled": False,
         }
 
-        proc = AsyncMock()
-        proc.communicate = AsyncMock(
-            return_value=(
-                ("noise before\n__PARAVIEW_MCP_RESULT__=" + json.dumps(payload) + "\n").encode(),
-                b"",
-            )
-        )
-        proc.returncode = 0
+        proc = _fake_proc(stdout=("noise before\n__PARAVIEW_MCP_RESULT__=" + json.dumps(payload) + "\n").encode())
 
         with patch("asyncio.create_subprocess_exec", return_value=proc):
             result = await executor.execute(code="__result__ = {'ok': True}")
@@ -495,15 +527,128 @@ class TestHeadlessExecutor:
     async def test_execute_invalid_payload_returns_error(self):
         executor = HeadlessPvpythonExecutor(pvpython_binary="pvpython")
 
-        proc = AsyncMock()
-        proc.communicate = AsyncMock(return_value=(b"__PARAVIEW_MCP_RESULT__={not-json}\n", b""))
-        proc.returncode = 0
+        proc = _fake_proc(stdout=b"__PARAVIEW_MCP_RESULT__={not-json}\n")
 
         with patch("asyncio.create_subprocess_exec", return_value=proc):
             result = await executor.execute(code="__result__ = {'ok': True}")
 
         assert result["result"] is None
         assert "invalid result payload" in result["error"]
+
+
+class TestHeadlessExecutorRobustness:
+    """Regressions for the stream-draining rewrite."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_preserves_output_written_before_the_kill(self):
+        """A hung script's earlier output is exactly what is needed to debug it.
+
+        communicate() discards everything it read when cancelled, so the old
+        implementation reported an empty stdout for every timeout.
+        """
+        executor = HeadlessPvpythonExecutor(pvpython_binary="pvpython")
+        proc = _fake_proc(stdout=b"progress: step 1\n", wait_forever=True)
+
+        killed: list[tuple[int, int]] = []
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=proc),
+            patch("os.getpgid", return_value=proc.pid),
+            patch("os.killpg", side_effect=lambda pgid, sig: killed.append((pgid, sig))),
+        ):
+            result = await executor.execute(code="hang()", timeout_seconds=1)
+
+        assert result["timed_out"] is True
+        assert "progress: step 1" in result["stdout"]
+        assert killed, "the timed-out process tree must be signalled"
+
+    @pytest.mark.asyncio
+    async def test_non_bytes_stream_does_not_spin(self):
+        """A pipe that never yields bytes must end the drain, not loop forever.
+
+        A bare AsyncMock returns a truthy MagicMock from read(), which an
+        unguarded `if not chunk: break` never terminates on — it allocates
+        until the machine dies.
+        """
+        executor = HeadlessPvpythonExecutor(pvpython_binary="pvpython")
+        proc = AsyncMock()
+        proc.returncode = 0
+
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            result = await asyncio.wait_for(executor.execute(code="x = 1"), timeout=10)
+
+        assert result["result"] is None
+        assert "without a result payload" in result["error"]
+
+    def test_stream_capture_is_bounded_and_keeps_head_and_tail(self):
+        capture = headless_module._StreamCapture(limit=1000)
+        capture.feed(b"HEAD" + b"." * 500)
+        capture.feed(b"M" * 100_000)
+        capture.feed(b"__PARAVIEW_MCP_RESULT__=TAIL\n")
+
+        value = capture.value()
+        assert capture.total == 504 + 100_000 + 29
+        assert len(value) < 2000, "capture must stay bounded regardless of volume"
+        assert value.startswith(b"HEAD")
+        assert value.endswith(b"__PARAVIEW_MCP_RESULT__=TAIL\n")
+        assert b"dropped" in value
+
+
+class TestHeadlessJobRetention:
+    """The job table must not grow without bound in a long-lived server."""
+
+    def test_finished_jobs_are_evicted_past_the_cap(self):
+        manager = HeadlessJobManager(max_jobs=3)
+        now = time.time()
+        for index in range(10):
+            manager._jobs[f"job-{index}"] = {
+                "job_id": f"job-{index}",
+                "status": "succeeded",
+                "created_at": now + index,
+                "completed_at": now + index,
+            }
+        manager._evict()
+
+        assert len(manager._jobs) == 3
+        # Oldest first: the survivors are the most recent three.
+        assert set(manager._jobs) == {"job-7", "job-8", "job-9"}
+
+    def test_running_jobs_are_never_evicted(self):
+        manager = HeadlessJobManager(max_jobs=1)
+        now = time.time()
+        manager._jobs["running"] = {
+            "job_id": "running",
+            "status": "running",
+            "created_at": now,
+            "completed_at": None,
+        }
+        for index in range(5):
+            manager._jobs[f"done-{index}"] = {
+                "job_id": f"done-{index}",
+                "status": "succeeded",
+                "created_at": now + index + 1,
+                "completed_at": now + index + 1,
+            }
+        manager._evict()
+
+        assert "running" in manager._jobs
+
+    def test_finished_jobs_expire_after_their_ttl(self):
+        manager = HeadlessJobManager(max_jobs=100, job_ttl_seconds=60)
+        manager._jobs["stale"] = {
+            "job_id": "stale",
+            "status": "succeeded",
+            "created_at": time.time() - 10_000,
+            "completed_at": time.time() - 10_000,
+        }
+        manager._jobs["fresh"] = {
+            "job_id": "fresh",
+            "status": "succeeded",
+            "created_at": time.time(),
+            "completed_at": time.time(),
+        }
+        manager._evict()
+
+        assert set(manager._jobs) == {"fresh"}
 
 
 class TestHeadlessTransportTools:
@@ -625,3 +770,205 @@ class TestMCPEntrypoint:
         with patch.object(mcp, "run") as run:
             main()
         run.assert_called_once_with(transport="stdio")
+
+
+class TestTransportValidation:
+    @pytest.mark.asyncio
+    async def test_unknown_transport_is_rejected(self):
+        """'Headless' used to fall through silently to the bridge transport."""
+        ctx = MagicMock()
+        conn = AsyncMock()
+        ctx.request_context.lifespan_context = conn
+
+        with pytest.raises(ValueError, match="transport must be one of"):
+            await python_exec(ctx, code="x = 1", transport="Headless")
+
+        conn.send_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bridge_transport_is_the_default(self):
+        ctx = MagicMock()
+        conn = AsyncMock()
+        conn.send_command = AsyncMock(return_value={"result": 1})
+        ctx.request_context.lifespan_context = conn
+
+        await python_exec(ctx, code="x = 1")
+
+        conn.send_command.assert_awaited_once()
+
+
+class TestConnectionAuth:
+    @pytest.mark.asyncio
+    async def test_requests_carry_the_bridge_token(self, isolated_state_dir):
+        from paraview_mcp_bridge import runtime
+
+        token = runtime.create_token()
+
+        sent: list[bytes] = []
+        mock_reader = AsyncMock()
+        mock_writer = AsyncMock()
+        mock_writer.write = MagicMock(side_effect=sent.append)
+        mock_writer.drain = AsyncMock()
+
+        conn = ParaViewConnection()
+
+        async def fake_connect():
+            conn._reader, conn._writer = mock_reader, mock_writer
+
+        request_ids = []
+
+        async def fake_readline():
+            payload = json.loads(sent[-1])
+            request_ids.append(payload["id"])
+            return json.dumps({"id": payload["id"], "success": True, "result": {}}).encode() + b"\n"
+
+        mock_reader.readline = AsyncMock(side_effect=fake_readline)
+        conn.connect = fake_connect
+
+        await conn.send_command("scene.get_info")
+
+        assert json.loads(sent[-1])["token"] == token
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_share_one_connection(self):
+        """connect() outside the lock let racing calls each open a socket."""
+        conn = ParaViewConnection()
+        connects = 0
+
+        mock_reader = AsyncMock()
+        mock_writer = AsyncMock()
+        mock_writer.write = MagicMock()
+        mock_writer.drain = AsyncMock()
+
+        async def fake_connect():
+            nonlocal connects
+            connects += 1
+            await asyncio.sleep(0.01)  # widen the race window
+            conn._reader, conn._writer = mock_reader, mock_writer
+
+        sent_ids: list[str] = []
+
+        def record(data: bytes):
+            sent_ids.append(json.loads(data)["id"])
+
+        mock_writer.write = MagicMock(side_effect=record)
+
+        async def fake_readline():
+            return json.dumps({"id": sent_ids[-1], "success": True, "result": {}}).encode() + b"\n"
+
+        mock_reader.readline = AsyncMock(side_effect=fake_readline)
+        conn.connect = fake_connect
+
+        await asyncio.gather(*(conn.send_command("scene.get_info") for _ in range(5)))
+
+        assert connects == 1
+
+
+class TestSessionStartReporting:
+    @pytest.mark.asyncio
+    async def test_failed_start_includes_the_log_tail(self, isolated_state_dir):
+        """Otherwise the caller sees 'started: false' with no reason at all."""
+        import paraview_mcp_server.server as server_module
+
+        log_path = isolated_state_dir / "launch.log"
+        log_path.write_text("Could not find start_paraview_bridge.py\n", encoding="utf-8")
+
+        dead = MagicMock()
+        dead.poll.return_value = 2
+        dead.pid = 4321
+
+        ctx = MagicMock()
+        with (
+            patch.object(server_module, "SESSION_LOG_PATH", log_path),
+            patch.object(server_module, "SESSION_PROCESS", None),
+            patch("paraview_mcp_server.server._port_is_open", return_value=False),
+            patch("paraview_mcp_server.server._wait_for_open_port", return_value=False),
+            patch("paraview_mcp_server.server._start_process", return_value=dead),
+        ):
+            result = json.loads(await session_start(ctx, wait_seconds=0.01))
+
+        assert result["started"] is False
+        assert "start_paraview_bridge.py" in result["log_tail"]
+
+
+class TestCancellationKillsTheProcessTree:
+    """Regression: cancelling a job left the real ParaView process running.
+
+    `pvpython` is a launcher that forks `pvpython-real` and waits for it.
+    Signalling only the direct child left the script running forever, holding
+    CPU and pipes. Children now get their own process group.
+    """
+
+    @pytest.mark.asyncio
+    async def test_subprocess_is_started_in_its_own_session(self):
+        executor = HeadlessPvpythonExecutor(pvpython_binary="pvpython")
+        captured: dict[str, Any] = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured.update(kwargs)
+            proc = MagicMock()
+            proc.stdout = _FakeStream(b"__PARAVIEW_MCP_RESULT__=" + json.dumps({"result": 1}).encode() + b"\n")
+            proc.stderr = _FakeStream(b"")
+            proc.returncode = 0
+
+            async def _wait():
+                return 0
+
+            proc.wait = _wait
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", new=fake_exec):
+            await executor.execute(code="x = 1")
+
+        assert captured.get("start_new_session") is True, (
+            "without its own process group, only the pvpython launcher gets signalled"
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_signals_the_whole_group(self):
+        executor = HeadlessPvpythonExecutor(pvpython_binary="pvpython")
+        proc = _fake_proc(stdout=b"", wait_forever=True)
+        proc.pid = 4242
+
+        killed: list[tuple[int, int]] = []
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=proc),
+            patch("os.getpgid", return_value=4242),
+            patch("os.killpg", side_effect=lambda pgid, sig: killed.append((pgid, sig))),
+        ):
+            result = await executor.execute(code="hang()", timeout_seconds=1)
+
+        assert result["timed_out"] is True
+        assert (4242, signal.SIGKILL) in killed, "the process group must be killed, not just the child"
+
+    @pytest.mark.asyncio
+    async def test_job_cancel_signals_the_whole_group(self):
+        manager = HeadlessJobManager()
+        executor = HeadlessPvpythonExecutor(pvpython_binary="pvpython")
+
+        proc = MagicMock()
+        proc.pid = 5150
+        proc.returncode = None
+
+        started = asyncio.Event()
+
+        async def never_finishes(**kwargs):
+            holder = kwargs.get("process_holder")
+            if holder is not None:
+                holder["process"] = proc
+            started.set()
+            await asyncio.Event().wait()
+
+        killed: list[tuple[int, int]] = []
+        with patch.object(executor, "execute", new=never_finishes):
+            job_id = await manager.create_job(executor, code="import time; time.sleep(600)")
+            await asyncio.wait_for(started.wait(), timeout=5)
+            with (
+                patch("os.getpgid", return_value=5150),
+                patch("os.killpg", side_effect=lambda pgid, sig: killed.append((pgid, sig))),
+            ):
+                result = await manager.cancel(job_id)
+
+        assert result["status"] == "cancelled"
+        assert (5150, signal.SIGTERM) in killed, "cancel must reach pvpython-real, not just the launcher"

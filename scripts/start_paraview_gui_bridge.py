@@ -20,17 +20,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 SCRIPT_PATH = globals().get("__file__")
 ROOT_CANDIDATES = []
 if SCRIPT_PATH:
-    ROOT_CANDIDATES.append(Path(SCRIPT_PATH).resolve().parents[1])
-ROOT_CANDIDATES.extend([Path.cwd(), Path.cwd().parent])
+    script_dir = Path(SCRIPT_PATH).resolve().parent
+    # Source checkout (<root>/scripts) and installed package data (<pkg>/_scripts).
+    ROOT_CANDIDATES.extend([script_dir.parent / "src", script_dir.parent])
+ROOT_CANDIDATES.extend([Path.cwd() / "src", Path.cwd(), Path.cwd().parent])
 
 for candidate in ROOT_CANDIDATES:
-    if (candidate / "bridge" / "gui_bridge.py").is_file():
-        repo_root = str(candidate)
-        if repo_root not in sys.path:
-            sys.path.insert(0, repo_root)
+    if (candidate / "paraview_mcp_bridge" / "gui_bridge.py").is_file():
+        package_parent = str(candidate)
+        if package_parent not in sys.path:
+            sys.path.insert(0, package_parent)
         break
 
-from bridge.gui_bridge import gui_bridge_status, start_gui_bridge, stop_gui_bridge  # noqa: E402
+from paraview_mcp_bridge.gui_bridge import gui_bridge_status, start_gui_bridge, stop_gui_bridge  # noqa: E402
 
 globals()["stop_gui_bridge"] = stop_gui_bridge
 globals()["gui_bridge_status"] = gui_bridge_status
@@ -42,6 +44,10 @@ def main() -> None:
     status = start_gui_bridge(host=host, port=port)
     state = "already running" if status["already_running"] else "started"
     print(f"ParaView MCP GUI bridge {state} on {status['host']}:{status['port']}")
+    if status.get("token_file"):
+        print(f"Bridge token: {status['token_file']} (readable by this user only)")
+    else:
+        print("Bridge authentication is DISABLED; any local process can execute Python here.")
     print("Verify from a terminal with:")
     print("  python scripts/paraview_bridge_request.py scene.get_info")
     print("Stop from the ParaView Python Shell with:")

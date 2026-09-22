@@ -20,7 +20,7 @@ def test_launcher_starts_gui_before_bridge():
         return proc
 
     with (
-        patch("paraview_mcp_server.launcher._repo_root", return_value=Path.cwd()),
+        patch("paraview_mcp_server.launcher.find_bridge_script", return_value=Path("start_paraview_bridge.py")),
         patch("paraview_mcp_server.launcher._wait_for_listen_port"),
         patch("paraview_mcp_server.launcher._wait_for_port"),
         patch("paraview_mcp_server.launcher._ensure_port_available"),
@@ -50,7 +50,7 @@ def test_launcher_strips_separator_from_paraview_args():
         return proc
 
     with (
-        patch("paraview_mcp_server.launcher._repo_root", return_value=Path.cwd()),
+        patch("paraview_mcp_server.launcher.find_bridge_script", return_value=Path("start_paraview_bridge.py")),
         patch("paraview_mcp_server.launcher._wait_for_listen_port"),
         patch("paraview_mcp_server.launcher._wait_for_port"),
         patch("paraview_mcp_server.launcher._ensure_port_available"),
@@ -85,7 +85,7 @@ def test_launcher_restarts_bridge_while_gui_is_running():
             gui_proc=gui_proc,
             bridge_proc=dead_bridge,
             pvpython="pvpython",
-            bridge_script=Path("bridge.py"),
+            bridge_script=Path("paraview_mcp_bridge.py"),
             bridge_host="127.0.0.1",
             bridge_port=9876,
             server_host="127.0.0.1",
@@ -101,7 +101,7 @@ def test_launcher_restarts_bridge_while_gui_is_running():
 
 def test_launcher_fails_before_starting_processes_when_port_is_unavailable():
     with (
-        patch("paraview_mcp_server.launcher._repo_root", return_value=Path.cwd()),
+        patch("paraview_mcp_server.launcher.find_bridge_script", return_value=Path("start_paraview_bridge.py")),
         patch("paraview_mcp_server.launcher._ensure_port_available", side_effect=RuntimeError("port busy")),
         patch("paraview_mcp_server.launcher.subprocess.Popen") as popen,
     ):

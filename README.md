@@ -78,9 +78,13 @@ paraview-mcp-server
 paraview-mcp-launch
 ```
 
+The bridge code and its startup scripts ship inside the wheel, and
+`paraview-mcp-launch` passes `pvpython` the path it needs, so this install is
+sufficient for the full GUI workflow.
+
 ### Clone the repository
 
-The bridge code must be available to ParaView's Python runtime. Clone the repository for live GUI control or local development:
+Clone the repository for local development, or to read and adapt the bridge scripts:
 
 ```bash
 git clone https://github.com/djeada/paraview-mcp-server.git
@@ -114,8 +118,8 @@ For a local editable checkout, you can call the executable directly:
 Expected output:
 
 ```text
-ParaView MCP bridge ready on 127.0.0.1:9876
 Launching ParaView GUI connected to cs://127.0.0.1:11111
+ParaView MCP bridge ready on 127.0.0.1:9876
 ```
 
 Keep the terminal open. Closing it stops the GUI, bridge, and local `pvserver` session.
@@ -144,6 +148,10 @@ Keep the terminal open. This command controls the `pvpython` session, not a sepa
 The default live bridge runs in a separate `pvpython` process connected to the same `pvserver` session as the ParaView GUI. Because it does not run inside the GUI's Qt event loop, it can safely modify the pipeline but does not control render views by default.
 
 Calling APIs such as `GetActiveViewOrCreate("RenderView")`, `Show()`, `Render()`, `SaveScreenshot()`, or camera and background tools from a separate `pvpython` client can create a detached VTK render window instead of modifying the visible GUI layout. To avoid that behavior, the bridge blocks display, camera, screenshot, animation, and render-related `python.execute` calls unless it is running inside the GUI bridge.
+
+For `python.execute`, the block is applied to the parsed syntax tree, so a comment or a variable named `Rendering` is not a false positive, while `pvs.Show(...)`, a bare `Show(...)`, and `getattr(pvs, "Show")` are all caught. It is a guardrail against accidentally opening a detached window, not a sandbox: `python.execute` is fully trusted either way, and code that assembles a name at runtime still gets through.
+
+Use the `mcp` helpers for pipeline work that should run in either mode. They skip display work instead of failing when no render view exists.
 
 For pipeline automation, create or update sources and filters first. Fixed tools return `shown: false` when display is skipped.
 
@@ -241,6 +249,20 @@ The server provides two levels of control:
 2. Python execution through `paraview_python_exec` for trusted local scripts and workflows not covered by the fixed tools.
 
 The fixed tool set covers common operations. Python execution provides access to the broader `paraview.simple` API.
+
+### Demos
+
+Runnable, end-to-end scenarios live in [`demos/`](demos/). They drive a real ParaView session through the real MCP server and check what came back:
+
+```bash
+python demos/run_scenarios.py
+```
+
+![Contour of RTData at 80 and 150](docs/images/04-contour.png)
+
+*"Add a contour of RTData at values 80 and 150, and hide the original volume."* — scenario `04-contour`, against ParaView 6.0.1.
+
+See [`docs/demos.md`](docs/demos.md) for every scenario with screenshots, and [`docs/demo-run.md`](docs/demo-run.md) for the per-step results of the latest run. Running these found three real bugs that the unit tests passed over.
 
 ### Example prompts
 
@@ -357,23 +379,29 @@ The server exposes 34 MCP tools.
 |---|---|---|
 | `pvs` | module | The imported `paraview.simple` module. |
 | `args` | dict | Arguments supplied through the `args` parameter. |
+| `mcp` | helper | `mcp.show()`, `mcp.find_render_view()`, `mcp.reset_camera()`, `mcp.create_polydata_source()`. |
 | `__result__` | Any | Assign a JSON-serializable value to return it to the caller. |
 
 ### Example
 
+This runs under both bridge modes:
+
 ```python
 src = pvs.OpenDataFile(args["filepath"])
-view = pvs.GetActiveViewOrCreate("RenderView")
-pvs.Show(src, view)
 
 slice_filter = pvs.Slice(Input=src)
 slice_filter.SliceType.Origin = [0, 0, 0]
 slice_filter.SliceType.Normal = [1, 0, 0]
-pvs.Show(slice_filter, view)
 
-pvs.ResetCamera(view)
-__result__ = {"done": True}
+# mcp.show() displays only if a render view already exists, so this never
+# opens a detached VTK window from the standalone pvpython bridge.
+shown = mcp.show(slice_filter)
+if shown:
+    mcp.reset_camera()
+__result__ = {"done": True, "shown": shown}
 ```
+
+Calling `pvs.Show()` or `GetActiveViewOrCreate()` directly is rejected by the default bridge. See [GUI and Qt limitations](#gui-and-qt-limitations).
 
 See [`docs/python-execute-design.md`](docs/python-execute-design.md) for the full design, schema reference, and additional examples.
 
@@ -409,9 +437,21 @@ Delete the server-side view or layout, close the window through the window manag
 
 Safeguards include:
 
-- stdout and stderr are limited to 50 KB.
-- The default cooperative timeout is 30 seconds.
-- Script paths can be restricted to approved root directories.
+- **Local authentication.** The bridge writes a random token to
+  `$XDG_RUNTIME_DIR/paraview-mcp-server/bridge.token` (mode `0600`, falling back
+  to `~/.local/state`) and requires it on every request. The MCP server and the
+  debug CLI read the same file, so same-user setups need no configuration.
+  Without it, any local account on a shared host could execute Python in your
+  ParaView session. Set `PARAVIEW_MCP_DISABLE_AUTH=1` to opt out.
+- **Loopback only.** The default bind is `127.0.0.1`; binding elsewhere logs a
+  warning. Requests are capped at 8 MB.
+- stdout and stderr are limited to 50 KB in the reported result, and the capture
+  buffers themselves are bounded.
+- The default cooperative timeout is 30 seconds. On the bridge transport a
+  timed-out script *keeps running* — Python cannot kill a thread — and the
+  result reports `abandoned_threads` so you can tell.
+- Script paths can be restricted to approved root directories with
+  `PARAVIEW_MCP_APPROVED_SCRIPT_ROOTS`.
 
 This project is a local desktop automation tool, not a public API sandbox.
 
@@ -445,17 +485,22 @@ python scripts/paraview_bridge_request.py export.screenshot --params '{"filepath
 paraview-mcp-server/
 ├── pyproject.toml
 ├── src/
-│   └── paraview_mcp_server/
-│       ├── __init__.py          # Re-exports main()
-│       ├── server.py            # FastMCP stdio server (34 tools)
-│       ├── launcher.py          # Starts pvserver, GUI, and bridge together
-│       └── headless.py          # Headless pvpython executor and job manager
-├── bridge/
-│   ├── __init__.py
-│   ├── server.py                # TCP socket bridge server
-│   ├── gui_bridge.py            # Experimental in-GUI bridge helpers
-│   ├── command_handler.py       # Command registry and paraview.simple handlers (27 commands)
-│   └── execution.py             # Trusted local python.execute helper
+│   ├── paraview_mcp_server/
+│   │   ├── __init__.py          # Re-exports main() and __version__
+│   │   ├── server.py            # FastMCP stdio server (34 tools)
+│   │   ├── launcher.py          # Starts pvserver, GUI, and bridge together
+│   │   └── headless.py          # Headless pvpython executor and job manager
+│   └── paraview_mcp_bridge/     # stdlib-only: runs inside ParaView's Python
+│       ├── __init__.py
+│       ├── server.py            # TCP socket bridge server
+│       ├── gui_bridge.py        # Experimental in-GUI bridge helpers
+│       ├── command_handler.py   # Command registry and paraview.simple handlers (27 commands)
+│       ├── models.py            # Bridge parameter validation
+│       ├── runtime.py           # State directory and local auth token
+│       └── execution.py         # Trusted local python.execute helper
+├── demos/
+│   ├── scenarios.py             # Prompt, tool calls, and checks per scenario
+│   └── run_scenarios.py         # MCP client that drives a live ParaView
 ├── scripts/
 │   ├── start_paraview_bridge.py
 │   ├── start_paraview_gui_bridge.py
@@ -469,10 +514,13 @@ paraview-mcp-server/
 │       └── save_screenshot.py
 ├── docs/
 │   ├── architecture.md
+│   ├── demos.md                 # Scenario walkthrough with screenshots
 │   └── python-execute-design.md
 └── tests/
+    ├── conftest.py              # Isolates bridge state from the real user dir
     ├── test_server.py           # 34 tools, connection, headless, async jobs
     ├── test_protocol.py         # Wire encoding and fake-bridge integration
+    ├── test_runtime.py          # Token/auth, state paths, launcher discovery
     └── test_command_handler.py  # All 27 handlers and execution controls
 ```
 

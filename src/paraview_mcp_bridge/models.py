@@ -91,9 +91,36 @@ class BridgeParams:
         self._values = values
 
     @classmethod
+    def known_fields(cls) -> set[str]:
+        """Every parameter name this command accepts."""
+        names: set[str] = set(cls.defaults)
+        for group in (
+            cls.required,
+            cls.strings,
+            cls.floats,
+            cls.ints,
+            cls.bools,
+            cls.vec3s,
+            cls.float_lists,
+            cls.dicts,
+            cls.positive_ints,
+            cls.positive_floats,
+            cls.nonnegative_ints,
+        ):
+            names.update(group)
+        return names
+
+    @classmethod
     def model_validate(cls, params: dict[str, Any]):
         if not isinstance(params, dict):
             raise BridgeValidationError("params must be an object")
+
+        known = cls.known_fields()
+        unknown = sorted(name for name in params if name not in known)
+        if unknown:
+            raise BridgeValidationError(
+                f"Unknown parameter(s): {', '.join(unknown)}. Accepted: {', '.join(sorted(known))}"
+            )
 
         values = dict(cls.defaults)
         for name in cls.required:
@@ -258,7 +285,7 @@ class FilterCalculatorParams(BridgeParams):
 
 
 class FilterStreamTracerParams(BridgeParams):
-    defaults = {"seed_type": "Line", "integration_direction": "BOTH", "num_points": 100}
+    defaults = {"seed_type": "Point Cloud", "integration_direction": "BOTH", "num_points": 100}
     required = ("input",)
     strings = ("input", "seed_type", "integration_direction")
     ints = ("num_points",)
@@ -279,8 +306,3 @@ class PythonExecuteParams(BridgeParams):
     strings = ("code", "script_path")
     floats = ("timeout_seconds",)
     positive_floats = ("timeout_seconds",)
-
-
-class JobIdParams(BridgeParams):
-    required = ("job_id",)
-    strings = ("job_id",)

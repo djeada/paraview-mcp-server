@@ -14,7 +14,31 @@ import json
 import socket
 import sys
 import uuid
+from pathlib import Path
 from typing import Any
+
+
+def _ensure_bridge_importable() -> None:
+    try:
+        import paraview_mcp_bridge  # noqa: F401, PLC0415
+
+        return
+    except ImportError:
+        pass
+    here = Path(__file__).resolve().parent
+    for candidate in (here.parent / "src", here.parent, Path.cwd() / "src", Path.cwd()):
+        if (candidate / "paraview_mcp_bridge" / "runtime.py").is_file():
+            sys.path.insert(0, str(candidate))
+            return
+
+
+def _read_token() -> str | None:
+    _ensure_bridge_importable()
+    try:
+        from paraview_mcp_bridge import runtime  # noqa: PLC0415
+    except ImportError:
+        return None
+    return runtime.read_token()
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,11 +59,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def send_request(host: str, port: int, command: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
-    request = {
+    request: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "command": command,
         "params": params,
     }
+    token = _read_token()
+    if token:
+        request["token"] = token
     with socket.create_connection((host, port), timeout=timeout) as sock:
         sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
         buffer = b""

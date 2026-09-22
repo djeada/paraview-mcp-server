@@ -15,15 +15,21 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from paraview_mcp_bridge import runtime
 from paraview_mcp_server.headless import HeadlessJobManager, HeadlessPvpythonExecutor
 
 logger = logging.getLogger(__name__)
 
-PARAVIEW_HOST = "127.0.0.1"
-PARAVIEW_PORT = 9876
+# Overridable so a second server (a demo run, a test rig) can talk to its own
+# bridge instead of whatever is on the default port.
+PARAVIEW_HOST = os.environ.get("PARAVIEW_MCP_BRIDGE_HOST", "127.0.0.1")
+PARAVIEW_PORT = int(os.environ.get("PARAVIEW_MCP_BRIDGE_PORT", "9876"))
+VALID_TRANSPORTS = ("bridge", "headless")
 HEADLESS_JOB_MANAGER = HeadlessJobManager()
 SESSION_PROCESS: subprocess.Popen[bytes] | None = None
-SESSION_LOG_PATH = Path(os.environ.get("PARAVIEW_MCP_SESSION_LOG", "/tmp/paraview-mcp-launch.log"))
+# Never /tmp: a predictable name in a world-writable directory is a symlink
+# target and collides between users on a shared host.
+SESSION_LOG_PATH = runtime.session_log_path()
 
 
 def _port_is_open(host: str, port: int, *, timeout: float = 0.3) -> bool:
@@ -86,9 +92,17 @@ def _process_state(proc: subprocess.Popen[bytes] | None) -> dict[str, Any]:
     }
 
 
+def _read_log_tail(log_path: Path, *, max_chars: int = 2000) -> str:
+    """Return the end of the launcher log, for surfacing a failed start."""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-max_chars:]
+
+
 def _start_process(command: list[str], log_path: Path) -> subprocess.Popen[bytes]:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_file = log_path.open("ab")
+    log_file = runtime.open_private_append(log_path)
     try:
         return subprocess.Popen(
             command,
@@ -127,20 +141,27 @@ class ParaViewConnection:
         await self._drop_connection()
 
     async def _send_command_once(self, command: str, params: dict | None = None) -> Any:
-        if not self._writer:
-            await self.connect()
-
-        assert self._reader is not None
-        assert self._writer is not None
         request_id = str(uuid.uuid4())
 
-        request = {
+        request: dict[str, Any] = {
             "id": request_id,
             "command": command,
             "params": params or {},
         }
+        # The bridge publishes a token readable only by this user; sending it
+        # proves we are the same local user rather than any process that
+        # happened to find the port.
+        token = runtime.read_token()
+        if token:
+            request["token"] = token
 
         async with self._lock:
+            # Connect inside the lock: two concurrent tool calls racing here
+            # would otherwise each open a socket and leak one of them.
+            if not self._writer:
+                await self.connect()
+            assert self._reader is not None
+            assert self._writer is not None
             try:
                 self._writer.write(json.dumps(request).encode() + b"\n")
                 await self._writer.drain()
@@ -231,11 +252,17 @@ async def session_status(
     bridge_port: int = PARAVIEW_PORT,
 ) -> str:
     del ctx
+    token = runtime.read_token()
     result = {
         "bridge": {
             "host": bridge_host,
             "port": bridge_port,
             "reachable": _port_is_open(bridge_host, bridge_port),
+        },
+        "auth": {
+            "token_file": str(runtime.token_file_path()),
+            "token_available": token is not None,
+            "disabled": runtime.auth_disabled(),
         },
         "session_process": _process_state(SESSION_PROCESS),
         "log_path": str(SESSION_LOG_PATH),
@@ -305,23 +332,24 @@ async def session_start(
         bridge_host=bridge_host,
         bridge_port=bridge_port,
     )
-    mode = "managed_session"
-
     SESSION_PROCESS = _start_process(command, SESSION_LOG_PATH)
-    bridge_reachable = bridge_already_running or _wait_for_open_port(bridge_host, bridge_port, timeout=wait_seconds)
+    bridge_reachable = _wait_for_open_port(bridge_host, bridge_port, timeout=wait_seconds)
     process_returncode = SESSION_PROCESS.poll()
+    started = process_returncode is None
 
-    return json.dumps(
-        {
-            "started": process_returncode is None,
-            "mode": mode,
-            "command": command,
-            "bridge_reachable": bridge_reachable,
-            "session_process": _process_state(SESSION_PROCESS),
-            "log_path": str(SESSION_LOG_PATH),
-        },
-        indent=2,
-    )
+    payload: dict[str, Any] = {
+        "started": started,
+        "mode": "managed_session",
+        "command": command,
+        "bridge_reachable": bridge_reachable,
+        "session_process": _process_state(SESSION_PROCESS),
+        "log_path": str(SESSION_LOG_PATH),
+    }
+    if not started:
+        # The launcher writes to a detached log file, so without this the
+        # caller sees "started: false" and no reason at all.
+        payload["log_tail"] = _read_log_tail(SESSION_LOG_PATH)
+    return json.dumps(payload, indent=2)
 
 
 @mcp.tool(
@@ -826,6 +854,8 @@ async def python_exec(
     timeout_seconds: int | None = None,
     transport: str = "bridge",
 ) -> str:
+    if transport not in VALID_TRANSPORTS:
+        raise ValueError(f"transport must be one of {', '.join(VALID_TRANSPORTS)}, got {transport!r}")
     if transport == "headless":
         executor = HeadlessPvpythonExecutor()
         result = await executor.execute(

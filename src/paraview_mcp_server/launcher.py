@@ -11,12 +11,50 @@ import sys
 import time
 from pathlib import Path
 
+import paraview_mcp_bridge
 
-def _repo_root() -> Path:
-    package_root = Path(__file__).resolve().parents[2]
-    if (package_root / "scripts" / "start_paraview_bridge.py").is_file():
-        return package_root
-    return Path.cwd()
+BRIDGE_SCRIPT_NAME = "start_paraview_bridge.py"
+
+
+def _candidate_script_dirs() -> list[Path]:
+    """Places the bridge entry-point script may live, most reliable first."""
+    package_dir = Path(__file__).resolve().parent
+    return [
+        # Installed: shipped inside the wheel as package data.
+        package_dir / "_scripts",
+        # Editable install / source checkout: src/paraview_mcp_server/../../scripts
+        package_dir.parents[1] / "scripts",
+        # Running straight from a clone laid out as <root>/src/...
+        package_dir.parents[2] / "scripts" if len(package_dir.parents) > 2 else package_dir / "_scripts",
+        Path.cwd() / "scripts",
+    ]
+
+
+def find_bridge_script() -> Path:
+    """Locate start_paraview_bridge.py for both source and pip installs."""
+    seen: set[Path] = set()
+    for directory in _candidate_script_dirs():
+        candidate = (directory / BRIDGE_SCRIPT_NAME).resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+    searched = "\n  ".join(str(path) for path in sorted(seen))
+    raise SystemExit(f"Could not find {BRIDGE_SCRIPT_NAME}. Looked in:\n  {searched}")
+
+
+def bridge_python_path() -> str:
+    """PYTHONPATH entries that let pvpython import the bridge package.
+
+    pvpython ships its own interpreter and does not see this process's
+    site-packages, so the directory holding ``paraview_mcp_bridge`` has to be
+    handed over explicitly.
+    """
+    package_parent = str(Path(paraview_mcp_bridge.__file__).resolve().parents[1])
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [package_parent, *[part for part in existing.split(os.pathsep) if part and part != package_parent]]
+    return os.pathsep.join(parts)
 
 
 def _wait_for_port(host: str, port: int, *, timeout: float, name: str) -> None:
@@ -32,20 +70,30 @@ def _wait_for_port(host: str, port: int, *, timeout: float, name: str) -> None:
     raise RuntimeError(f"Timed out waiting for {name} on {host}:{port}: {last_error}")
 
 
-def _wait_for_listen_port(port: int, *, timeout: float, name: str) -> None:
-    deadline = time.monotonic() + timeout
-    needle = f":{port:04X}"
-    while time.monotonic() < deadline:
+def _port_in_use(host: str, port: int) -> bool:
+    """Whether something already holds *host:port*.
+
+    Probing by bind rather than by connect keeps this portable (the previous
+    /proc/net/tcp parse silently never succeeded off Linux) and avoids opening
+    a client connection to pvserver just to test it. SO_REUSEADDR is left off
+    deliberately: with it set, the bind can succeed alongside a live listener
+    and the probe would never report the port as taken.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         try:
-            lines = Path("/proc/net/tcp").read_text(encoding="utf-8").splitlines()
+            sock.bind((host, port))
         except OSError:
-            lines = []
-        for line in lines[1:]:
-            columns = line.split()
-            if len(columns) >= 4 and columns[1].endswith(needle) and columns[3] == "0A":
-                return
+            return True
+    return False
+
+
+def _wait_for_listen_port(port: int, *, timeout: float, name: str, host: str = "127.0.0.1") -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _port_in_use(host, port):
+            return
         time.sleep(0.2)
-    raise RuntimeError(f"Timed out waiting for {name} to listen on port {port}")
+    raise RuntimeError(f"Timed out waiting for {name} to listen on {host}:{port}")
 
 
 def _ensure_port_available(host: str, port: int, *, name: str) -> None:
@@ -78,6 +126,8 @@ def _start_bridge(
     server_port: int,
     repo_root: Path,
 ) -> subprocess.Popen[bytes]:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = bridge_python_path()
     return subprocess.Popen(
         [
             pvpython,
@@ -92,6 +142,7 @@ def _start_bridge(
             str(server_port),
         ],
         cwd=str(repo_root),
+        env=env,
     )
 
 
@@ -161,10 +212,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    repo_root = _repo_root()
-    bridge_script = repo_root / "scripts" / "start_paraview_bridge.py"
-    if not bridge_script.is_file():
-        raise SystemExit(f"Could not find bridge script: {bridge_script}")
+    bridge_script = find_bridge_script()
+    repo_root = Path.cwd()
 
     paraview = shutil.which(args.paraview) or args.paraview
     pvserver = shutil.which(args.pvserver) or args.pvserver
@@ -189,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--bind-address=127.0.0.1",
             ]
         )
-        _wait_for_listen_port(args.server_port, timeout=20, name="pvserver")
+        _wait_for_listen_port(args.server_port, timeout=20, name="pvserver", host="127.0.0.1")
 
         print(f"Launching ParaView GUI connected to cs://{args.server_host}:{args.server_port}", flush=True)
         gui_proc = subprocess.Popen(

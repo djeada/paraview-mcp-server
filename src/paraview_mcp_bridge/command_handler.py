@@ -12,7 +12,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from bridge.models import (
+from paraview_mcp_bridge.execution import find_render_api_calls
+from paraview_mcp_bridge.models import (
     DisplayColorByParams,
     DisplaySetOpacityParams,
     DisplaySetRepresentationParams,
@@ -26,7 +27,6 @@ from bridge.models import (
     FilterSliceParams,
     FilterStreamTracerParams,
     FilterThresholdParams,
-    JobIdParams,
     PythonExecuteParams,
     SourceNameParams,
     SourceOpenFileParams,
@@ -38,13 +38,14 @@ from bridge.models import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from bridge.models import BridgeParams
+    from paraview_mcp_bridge.models import BridgeParams
 
 logger = logging.getLogger(__name__)
 
 _DETACHED_WINDOW_OPT_IN_ENV = "PARAVIEW_MCP_ALLOW_DETACHED_RENDER_WINDOW"
 _LEGACY_VIEW_CREATE_OPT_IN_ENV = "PARAVIEW_MCP_ALLOW_VIEW_CREATE"
 _GUI_BRIDGE_ENV = "PARAVIEW_MCP_GUI_BRIDGE"
+DEFAULT_STREAM_TRACER_SEED_TYPE = "Point Cloud"
 _PYTHON_RENDER_TOKENS = (
     "GetActiveViewOrCreate",
     "CreateRenderView",
@@ -86,8 +87,6 @@ _VALIDATORS: dict[str, type[BridgeParams]] = {
     "filter.stream_tracer": FilterStreamTracerParams,
     "filter.glyph": FilterGlyphParams,
     "python.execute": PythonExecuteParams,
-    "job.status": JobIdParams,
-    "job.cancel": JobIdParams,
 }
 
 
@@ -178,11 +177,27 @@ class CommandHandler:
         raise ValueError(f"Source {name!r} not found in the pipeline")
 
     def _get_source_name(self, proxy: Any) -> str:
+        name = self._safe_source_name(proxy)
+        if name is None:
+            raise ValueError("Source proxy is not registered in the pipeline")
+        return name
+
+    def _safe_source_name(self, proxy: Any) -> str | None:
+        """Registered name of *proxy*, or None if it cannot be determined.
+
+        Used when reporting the object a filter just created: the filter itself
+        succeeded, so failing the whole call because the name lookup came up
+        empty would be worse than returning a null name.
+        """
         pvs = self._import_pv()
-        for (src_name, _id), candidate in pvs.GetSources().items():
-            if candidate == proxy:
+        try:
+            sources = pvs.GetSources().items()
+        except Exception:
+            return None
+        for (src_name, _id), candidate in sources:
+            if candidate is proxy or candidate == proxy:
                 return str(src_name)
-        raise ValueError("Source proxy is not registered in the pipeline")
+        return None
 
     @staticmethod
     def _proxy_has_property(proxy: Any, name: str) -> bool:
@@ -242,6 +257,10 @@ class CommandHandler:
                 if self._is_render_view(view):
                     return view
         return None
+
+    def find_existing_render_view(self, pvs: Any) -> Any | None:
+        """Public wrapper around :meth:`_find_render_view` for script helpers."""
+        return self._find_render_view(pvs)
 
     def _get_render_view(self, pvs: Any, *, required: bool = True) -> Any | None:
         if not self._render_control_allowed():
@@ -452,7 +471,7 @@ class CommandHandler:
             camera.SetViewUp(*params["view_up"])
         if "parallel_scale" in params:
             camera.SetParallelScale(params["parallel_scale"])
-        if os.environ.get("PARAVIEW_MCP_GUI_BRIDGE") != "1":
+        if os.environ.get(_GUI_BRIDGE_ENV) != "1":
             view.StillRender()
         pos = list(camera.GetPosition())
         fp = list(camera.GetFocalPoint())
@@ -469,6 +488,11 @@ class CommandHandler:
         pvs = self._import_pv()
         view = self._require_render_view(pvs)
         color = params["color"]
+        # ParaView >= 5.10 renders the *colour palette* background by default
+        # and ignores the view's own Background property. Without opting out,
+        # this tool reports success and changes nothing on screen.
+        if self._proxy_has_property(view, "UseColorPaletteForBackground"):
+            view.UseColorPaletteForBackground = 0
         view.Background = color
         result = {"color": color, "gradient": "color2" in params}
         if "color2" in params:
@@ -549,7 +573,14 @@ class CommandHandler:
         filt.SliceType.Origin = origin
         filt.SliceType.Normal = normal
         shown = self._show_if_render_view(pvs, filt)
-        return {"input": params["input"], "filter": "Slice", "origin": origin, "normal": normal, "shown": shown}
+        return {
+            "name": self._safe_source_name(filt),
+            "input": params["input"],
+            "filter": "Slice",
+            "origin": origin,
+            "normal": normal,
+            "shown": shown,
+        }
 
     def _filter_clip(self, params: dict) -> dict:
         pvs = self._import_pv()
@@ -560,7 +591,14 @@ class CommandHandler:
         filt.ClipType.Origin = origin
         filt.ClipType.Normal = normal
         shown = self._show_if_render_view(pvs, filt)
-        return {"input": params["input"], "filter": "Clip", "origin": origin, "normal": normal, "shown": shown}
+        return {
+            "name": self._safe_source_name(filt),
+            "input": params["input"],
+            "filter": "Clip",
+            "origin": origin,
+            "normal": normal,
+            "shown": shown,
+        }
 
     def _filter_contour(self, params: dict) -> dict:
         pvs = self._import_pv()
@@ -571,7 +609,14 @@ class CommandHandler:
         filt.ContourBy = ["POINTS", array]
         filt.Isosurfaces = values
         shown = self._show_if_render_view(pvs, filt)
-        return {"input": params["input"], "filter": "Contour", "array": array, "values": values, "shown": shown}
+        return {
+            "name": self._safe_source_name(filt),
+            "input": params["input"],
+            "filter": "Contour",
+            "array": array,
+            "values": values,
+            "shown": shown,
+        }
 
     def _filter_threshold(self, params: dict) -> dict:
         pvs = self._import_pv()
@@ -590,6 +635,7 @@ class CommandHandler:
                 filt.ThresholdMethod = "Between"
         shown = self._show_if_render_view(pvs, filt)
         return {
+            "name": self._safe_source_name(filt),
             "input": params["input"],
             "filter": "Threshold",
             "array": array,
@@ -614,6 +660,7 @@ class CommandHandler:
         filt.AttributeType = attribute_type
         shown = self._show_if_render_view(pvs, filt)
         return {
+            "name": self._safe_source_name(filt),
             "input": params["input"],
             "filter": "Calculator",
             "expression": expression,
@@ -624,7 +671,7 @@ class CommandHandler:
     def _filter_stream_tracer(self, params: dict) -> dict:
         pvs = self._import_pv()
         src = self._find_source(params["input"])
-        seed_type = params.get("seed_type", "Point Cloud")
+        seed_type = params.get("seed_type", DEFAULT_STREAM_TRACER_SEED_TYPE)
         integration_direction = params.get("integration_direction", "BOTH")
         num_points = int(params.get("num_points", 100))
         max_length = float(params.get("max_length", 1.0))
@@ -635,6 +682,7 @@ class CommandHandler:
             filt.SeedType.NumberOfPoints = num_points
         shown = self._show_if_render_view(pvs, filt)
         return {
+            "name": self._safe_source_name(filt),
             "input": params["input"],
             "filter": "StreamTracer",
             "seed_type": seed_type,
@@ -656,6 +704,7 @@ class CommandHandler:
             filt.ScaleArray = ["POINTS", scale_array]
         shown = self._show_if_render_view(pvs, filt)
         return {
+            "name": self._safe_source_name(filt),
             "input": params["input"],
             "filter": "Glyph",
             "glyph_type": glyph_type,
@@ -668,7 +717,7 @@ class CommandHandler:
     # ------------------------------------------------------------------
 
     def _python_execute(self, params: dict) -> dict:
-        from bridge.execution import execute_code  # noqa: PLC0415
+        from paraview_mcp_bridge.execution import execute_code  # noqa: PLC0415
 
         code = params.get("code")
         script_path = params.get("script_path")
@@ -694,11 +743,12 @@ class CommandHandler:
                 return
         if not source:
             return
-        blocked = [token for token in _PYTHON_RENDER_TOKENS if token in source]
+        blocked = find_render_api_calls(source, _PYTHON_RENDER_TOKENS)
         if blocked:
             raise RuntimeError(
                 "python.execute in the separate pvpython bridge may not call render/view/display APIs "
-                f"because they can open detached windows. Blocked token(s): {', '.join(blocked)}. "
-                "Use fixed pipeline tools without display calls, start the in-GUI bridge, or set "
-                f"{_DETACHED_WINDOW_OPT_IN_ENV}=1 to explicitly allow detached render windows."
+                f"because they can open detached windows. Blocked API(s): {', '.join(blocked)}. "
+                "Use mcp.show(...) / mcp.find_render_view(), which no-op when no view exists, start "
+                f"the in-GUI bridge, or set {_DETACHED_WINDOW_OPT_IN_ENV}=1 to explicitly allow "
+                "detached render windows."
             )

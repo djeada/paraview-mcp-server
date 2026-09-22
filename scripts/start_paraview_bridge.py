@@ -6,15 +6,23 @@ Run this with pvpython:
     pvpython scripts/start_paraview_bridge.py [--host 127.0.0.1] [--port 9876]
     pvpython scripts/start_paraview_bridge.py --server-host 127.0.0.1 --server-port 11111
 
-The bridge will listen for JSON commands from the paraview-mcp-server process.
+The bridge listens for JSON commands from the paraview-mcp-server process.
+
+pvpython does not share the MCP server's virtualenv, so the ``paraview_mcp_bridge``
+package must be importable. ``paraview-mcp-launch`` arranges that by setting
+PYTHONPATH; when running this script by hand from a checkout it falls back to
+locating the package next to this file.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
+import os
 import sys
 import time
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +31,31 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("start_paraview_bridge")
+
+
+def _ensure_bridge_importable() -> None:
+    """Put the directory containing ``paraview_mcp_bridge`` on sys.path."""
+    try:
+        import paraview_mcp_bridge  # noqa: F401, PLC0415
+
+        return
+    except ImportError:
+        pass
+
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here.parent / "src",  # source checkout: <root>/src/paraview_mcp_bridge
+        here.parent,  # installed package data: <pkg>/_scripts/..
+        Path.cwd() / "src",
+        Path.cwd(),
+    ]
+    for candidate in candidates:
+        if (candidate / "paraview_mcp_bridge" / "server.py").is_file():
+            if str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
+            return
+    searched = "\n  ".join(str(path) for path in candidates)
+    raise SystemExit(f"Could not import 'paraview_mcp_bridge'. Looked in:\n  {searched}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,15 +69,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    _ensure_bridge_importable()
 
-    # Add the repo root to sys.path so 'bridge' package is importable.
-    import os
-
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
-
-    from bridge.server import ParaViewBridgeServer
+    from paraview_mcp_bridge import runtime
+    from paraview_mcp_bridge.server import ParaViewBridgeServer
 
     process_server_events = None
     if args.server_host:
@@ -62,7 +90,15 @@ def main() -> None:
     server = ParaViewBridgeServer(host=args.host, port=args.port)
     server.start()
 
-    logger.info("ParaView bridge ready on %s:%s — press Ctrl+C to stop.", args.host, args.port)
+    if server.token:
+        logger.info("Bridge token written to %s (readable by this user only).", runtime.token_file_path())
+    else:
+        logger.warning(
+            "Bridge authentication is disabled (%s=1). Any local process can execute Python in this session.",
+            runtime.DISABLE_AUTH_ENV,
+        )
+
+    logger.info("ParaView bridge ready on %s:%s — press Ctrl+C to stop.", server.host, server.port)
     try:
         while True:
             if process_server_events is not None:
@@ -71,6 +107,10 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down ParaView bridge.")
         server.stop()
+        if server.token:
+            # Leave no stale token behind for the next bridge to trip over.
+            with contextlib.suppress(OSError):
+                os.remove(runtime.token_file_path())
 
 
 if __name__ == "__main__":

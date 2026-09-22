@@ -6,8 +6,10 @@ These tests patch _import_pv so ParaView does not need to be installed.
 
 from __future__ import annotations
 
+import io
 import os
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -107,7 +109,7 @@ def _make_pv_mock():
 @pytest.fixture()
 def handler(monkeypatch):
     """Provide a CommandHandler with _import_pv patched to return a mock pvs."""
-    from bridge.command_handler import CommandHandler
+    from paraview_mcp_bridge.command_handler import CommandHandler
 
     monkeypatch.setenv("PARAVIEW_MCP_GUI_BRIDGE", "1")
     h = CommandHandler()
@@ -119,7 +121,7 @@ def handler(monkeypatch):
 @pytest.fixture()
 def safe_handler(monkeypatch):
     """Provide a separate pvpython bridge handler with render control disabled."""
-    from bridge.command_handler import CommandHandler
+    from paraview_mcp_bridge.command_handler import CommandHandler
 
     monkeypatch.delenv("PARAVIEW_MCP_GUI_BRIDGE", raising=False)
     monkeypatch.delenv("PARAVIEW_MCP_ALLOW_DETACHED_RENDER_WINDOW", raising=False)
@@ -619,7 +621,7 @@ class TestExecutionControls:
     """Test the execution controls in bridge/execution.py."""
 
     def test_standard_library_imports_are_allowed(self):
-        from bridge.execution import execute_code
+        from paraview_mcp_bridge.execution import execute_code
 
         result = execute_code(code="import subprocess\n__result__ = subprocess.__name__")
 
@@ -627,7 +629,7 @@ class TestExecutionControls:
         assert result["result"] == "subprocess"
 
     def test_output_capping(self):
-        from bridge.execution import _cap_output
+        from paraview_mcp_bridge.execution import _cap_output
 
         short = "hello"
         assert _cap_output(short) == "hello"
@@ -637,32 +639,32 @@ class TestExecutionControls:
         assert "truncated" in capped
 
     def test_script_path_validation_missing_file(self):
-        from bridge.execution import _validate_script_path
+        from paraview_mcp_bridge.execution import _validate_script_path
 
         with pytest.raises(FileNotFoundError):
             _validate_script_path("/nonexistent/path/script.py")
 
     def test_code_and_script_path_mutual_exclusion(self):
-        from bridge.execution import execute_code
+        from paraview_mcp_bridge.execution import execute_code
 
         with pytest.raises(ValueError, match="not both"):
             execute_code(code="pass", script_path="/tmp/x.py")
 
     def test_neither_code_nor_script_path_raises(self):
-        from bridge.execution import execute_code
+        from paraview_mcp_bridge.execution import execute_code
 
         with pytest.raises(ValueError, match="must be provided"):
             execute_code()
 
     def test_polydata_helper_validates_registration_name(self):
-        from bridge.execution import _validate_registration_name
+        from paraview_mcp_bridge.execution import _validate_registration_name
 
         assert _validate_registration_name("Seed Points_1") == "Seed Points_1"
         with pytest.raises(ValueError, match="registration name"):
             _validate_registration_name("../bad")
 
     def test_polydata_helper_generates_programmable_source_script(self):
-        from bridge.execution import _build_polydata_programmable_script
+        from paraview_mcp_bridge.execution import _build_polydata_programmable_script
 
         script = _build_polydata_programmable_script(
             {
@@ -683,3 +685,274 @@ class TestExecutionControls:
         h, _ = handler
         with pytest.raises(ValueError, match="provided together"):
             h.handle("export.animation", {"filepath": "/tmp/anim.avi", "frame_start": 1})
+
+
+class TestExecutionOutputIsolation:
+    """Regressions for the process-wide stdout hijack on timeout."""
+
+    def test_timeout_does_not_hijack_process_streams(self):
+        """A timed-out script must not leave sys.stdout replaced.
+
+        The worker thread cannot be killed, so a redirect_stdout context it
+        never unwinds would leave the bridge's real stdout swallowed for the
+        lifetime of the process, silencing its own logging.
+        """
+        import sys
+
+        from paraview_mcp_bridge.execution import execute_code
+
+        result = execute_code(code="import threading\nthreading.Event().wait()", timeout_seconds=0.3)
+        assert result["timed_out"] is True
+
+        captured = io.StringIO()
+        real_stdout, real_stderr = sys.stdout, sys.stderr
+        try:
+            sys.stdout = captured
+            print("visible")
+        finally:
+            sys.stdout = real_stdout
+        assert captured.getvalue() == "visible\n"
+        assert sys.stderr is real_stderr
+
+    def test_timeout_reports_the_abandoned_thread(self):
+        from paraview_mcp_bridge.execution import execute_code
+
+        result = execute_code(code="import threading\nthreading.Event().wait()", timeout_seconds=0.3)
+        assert result["abandoned_threads"] >= 1
+        assert "still running in the background" in result["error"]
+
+    def test_captured_output_is_bounded(self):
+        """A chatty script must not grow the capture buffer without limit."""
+        from paraview_mcp_bridge.execution import MAX_OUTPUT_SIZE, execute_code
+
+        result = execute_code(
+            code="for _ in range(500):\n    print('x' * 1000)",
+            timeout_seconds=30,
+        )
+        assert result["error"] is None
+        assert len(result["stdout"]) <= MAX_OUTPUT_SIZE + 200
+        assert "truncated" in result["stdout"]
+
+    def test_bounded_buffer_counts_everything_it_drops(self):
+        from paraview_mcp_bridge.execution import _BoundedBuffer
+
+        buffer = _BoundedBuffer(limit=100)
+        for _ in range(50):
+            buffer.write("y" * 100)
+
+        value = buffer.getvalue()
+        assert value.startswith("y" * 100)
+        assert "truncated, 5000 total chars" in value
+        assert len(value) < 200
+
+    def test_concurrent_scripts_capture_their_own_output(self):
+        import threading
+
+        from paraview_mcp_bridge.execution import execute_code
+
+        results: dict[str, dict] = {}
+
+        def run(tag: str) -> None:
+            results[tag] = execute_code(code=f"print({tag!r})\n__result__ = {tag!r}", timeout_seconds=5)
+
+        threads = [threading.Thread(target=run, args=(tag,)) for tag in ("alpha", "beta", "gamma")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        for tag in ("alpha", "beta", "gamma"):
+            assert results[tag]["stdout"].strip() == tag
+            assert results[tag]["result"] == tag
+
+
+class TestRenderApiGuard:
+    """The guard must match real calls, not raw text."""
+
+    def test_comment_mentioning_a_blocked_name_is_allowed(self, safe_handler):
+        handler, _pvs = safe_handler
+        result = handler.handle(
+            "python.execute", {"code": "# Show the user a number\n__result__ = 1", "timeout_seconds": 5}
+        )
+        assert result["result"] == 1
+
+    def test_unrelated_identifier_is_allowed(self, safe_handler):
+        handler, _pvs = safe_handler
+        result = handler.handle(
+            "python.execute", {"code": "Rendering = 2\n__result__ = Rendering", "timeout_seconds": 5}
+        )
+        assert result["result"] == 2
+
+    def test_attribute_call_is_blocked(self, safe_handler):
+        handler, _pvs = safe_handler
+        with pytest.raises(RuntimeError, match="Blocked API"):
+            handler.handle("python.execute", {"code": 'pvs.Show(src, pvs.GetActiveViewOrCreate("RenderView"))'})
+
+    def test_bare_name_call_is_blocked(self, safe_handler):
+        handler, _pvs = safe_handler
+        with pytest.raises(RuntimeError, match="Blocked API"):
+            handler.handle("python.execute", {"code": "from paraview.simple import Show\nShow(src)"})
+
+    def test_getattr_indirection_is_blocked(self, safe_handler):
+        """The old substring check waved this through."""
+        handler, _pvs = safe_handler
+        with pytest.raises(RuntimeError, match="Blocked API"):
+            handler.handle("python.execute", {"code": "fn = getattr(pvs, 'Show')\nfn(src)"})
+
+    def test_syntax_error_is_left_to_exec(self, safe_handler):
+        handler, _pvs = safe_handler
+        result = handler.handle("python.execute", {"code": "def (:", "timeout_seconds": 5})
+        assert "SyntaxError" in (result["error"] or "")
+
+    def test_shipped_pipeline_library_scripts_pass_the_guard(self, safe_handler):
+        """The scripts we ship must work in the mode we ship them for."""
+        handler, _pvs = safe_handler
+        library = Path(__file__).resolve().parents[1] / "scripts" / "library"
+        for name in ("open_dataset.py", "create_slice.py", "create_contour.py"):
+            source = (library / name).read_text(encoding="utf-8")
+            handler._validate_python_exec_does_not_control_rendering(code=source, script_path=None)
+
+    def test_shipped_render_library_scripts_are_labelled(self):
+        """Render-only scripts must say so, since the default bridge rejects them."""
+        library = Path(__file__).resolve().parents[1] / "scripts" / "library"
+        for name in ("color_by.py", "reset_camera.py", "save_screenshot.py"):
+            source = (library / name).read_text(encoding="utf-8")
+            assert "RENDER-VIEW SCRIPT" in source
+
+
+class TestScriptPathValidation:
+    def test_approved_root_is_not_a_bare_prefix_match(self, tmp_path, monkeypatch):
+        """'/srv/safe' must not also admit '/srv/safe-evil/script.py'."""
+        from paraview_mcp_bridge import execution
+
+        safe = tmp_path / "safe"
+        evil = tmp_path / "safe-evil"
+        safe.mkdir()
+        evil.mkdir()
+        allowed = safe / "ok.py"
+        allowed.write_text("__result__ = 1", encoding="utf-8")
+        sneaky = evil / "bad.py"
+        sneaky.write_text("__result__ = 2", encoding="utf-8")
+
+        monkeypatch.setattr(execution, "APPROVED_SCRIPT_ROOTS", [str(safe)])
+
+        assert execution._validate_script_path(str(allowed)) == str(allowed.resolve())
+        with pytest.raises(PermissionError):
+            execution._validate_script_path(str(sneaky))
+
+    def test_roots_can_be_configured_from_the_environment(self, tmp_path, monkeypatch):
+        from paraview_mcp_bridge import execution
+
+        safe = tmp_path / "safe"
+        safe.mkdir()
+        script = safe / "ok.py"
+        script.write_text("__result__ = 1", encoding="utf-8")
+        outside = tmp_path / "outside.py"
+        outside.write_text("__result__ = 2", encoding="utf-8")
+
+        monkeypatch.setattr(execution, "APPROVED_SCRIPT_ROOTS", None)
+        monkeypatch.setenv(execution.APPROVED_SCRIPT_ROOTS_ENV, str(safe))
+
+        assert execution._validate_script_path(str(script)) == str(script.resolve())
+        with pytest.raises(PermissionError):
+            execution._validate_script_path(str(outside))
+
+    def test_inline_code_can_be_disabled_from_the_environment(self, monkeypatch):
+        from paraview_mcp_bridge import execution
+
+        monkeypatch.setattr(execution, "ALLOW_INLINE_CODE", None)
+        monkeypatch.setenv(execution.ALLOW_INLINE_CODE_ENV, "0")
+
+        with pytest.raises(PermissionError, match="Inline code execution is disabled"):
+            execution.execute_code(code="__result__ = 1")
+
+
+class TestParamValidationRejectsUnknownKeys:
+    def test_typo_is_reported_rather_than_forwarded(self):
+        from paraview_mcp_bridge.models import BridgeValidationError, SourceOpenFileParams
+
+        with pytest.raises(BridgeValidationError, match="Unknown parameter"):
+            SourceOpenFileParams.model_validate({"filepath": "/x.vtu", "filepth": "/y.vtu"})
+
+    def test_known_keys_still_validate(self):
+        from paraview_mcp_bridge.models import SourceOpenFileParams
+
+        assert SourceOpenFileParams.model_validate({"filepath": "/x.vtu"}).model_dump() == {"filepath": "/x.vtu"}
+
+    def test_stream_tracer_default_matches_the_handler(self):
+        from paraview_mcp_bridge.command_handler import DEFAULT_STREAM_TRACER_SEED_TYPE
+        from paraview_mcp_bridge.models import FilterStreamTracerParams
+
+        values = FilterStreamTracerParams.model_validate({"input": "src"}).model_dump()
+        assert values["seed_type"] == DEFAULT_STREAM_TRACER_SEED_TYPE
+
+
+class TestBackgroundColorActuallyApplies:
+    """Regression: the tool used to report success while changing nothing."""
+
+    def test_opts_out_of_the_color_palette(self, handler):
+        h, pvs = handler
+        view = pvs.GetActiveViewOrCreate.return_value
+        view.ListProperties.return_value = [
+            "Background",
+            "Background2",
+            "BackgroundColorMode",
+            "UseColorPaletteForBackground",
+        ]
+
+        result = h.handle("view.set_background", {"color": [0.1, 0.2, 0.3]})
+
+        # ParaView >= 5.10 renders the palette background unless this is cleared,
+        # so setting Background alone has no visible effect.
+        assert view.UseColorPaletteForBackground == 0
+        assert list(view.Background) == [0.1, 0.2, 0.3]
+        assert result["gradient"] is False
+
+    def test_older_paraview_without_the_property_still_works(self, handler):
+        h, pvs = handler
+        view = pvs.GetActiveViewOrCreate.return_value
+        view.ListProperties.return_value = ["Background", "Background2", "UseGradientBackground"]
+
+        result = h.handle("view.set_background", {"color": [0.1, 0.2, 0.3], "color2": [0.4, 0.5, 0.6]})
+
+        assert view.UseGradientBackground is True
+        assert result["gradient"] is True
+
+
+class TestFiltersReportTheirCreatedName:
+    """Without a name, a caller cannot address the object the filter just made."""
+
+    def test_every_filter_returns_the_new_pipeline_name(self, handler):
+        h, pvs = handler
+        existing = next(iter(pvs.GetSources.return_value.values()))
+
+        calls = [
+            ("filter.slice", {"input": "disk.ex2"}, pvs.Slice),
+            ("filter.clip", {"input": "disk.ex2"}, pvs.Clip),
+            ("filter.contour", {"input": "disk.ex2", "array": "P", "values": [1.0]}, pvs.Contour),
+            ("filter.threshold", {"input": "disk.ex2", "array": "P", "lower": 0.0, "upper": 1.0}, pvs.Threshold),
+            ("filter.calculator", {"input": "disk.ex2", "expression": "P*2"}, pvs.Calculator),
+            ("filter.stream_tracer", {"input": "disk.ex2"}, pvs.StreamTracer),
+            ("filter.glyph", {"input": "disk.ex2"}, pvs.Glyph),
+        ]
+        for command, params, constructor in calls:
+            expected = f"{command.split('.')[1].title()}1"
+            # Register the created proxy the way ParaView registers a filter.
+            pvs.GetSources.return_value = {
+                ("disk.ex2", 1): existing,
+                (expected, 2): constructor.return_value,
+            }
+            result = h.handle(command, params)
+            assert "name" in result, f"{command} must report the object it created"
+            assert result["name"] == expected, command
+
+    def test_name_is_null_when_it_cannot_be_determined(self, handler):
+        """A filter that worked must not fail just because naming did."""
+        h, pvs = handler
+        existing = next(iter(pvs.GetSources.return_value.values()))
+        pvs.GetSources.return_value = {("disk.ex2", 1): existing}
+
+        result = h.handle("filter.slice", {"input": "disk.ex2"})
+
+        assert result["filter"] == "Slice"
+        assert result["name"] is None
